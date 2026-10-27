@@ -29,6 +29,9 @@ ___
 ## Vega for Desktop 
 https://github.com/vega-org/vega-desktop
 
+## Vega for Web
+https://web.vega-app.in
+
 
 <br>
 

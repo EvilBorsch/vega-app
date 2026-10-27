@@ -76,7 +76,9 @@ jobs:
           set -euo pipefail
           chmod +x android/gradlew
           cd android
-          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 --console=plain
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=1 --no-parallel --console=plain --stacktrace \
+            '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -XX:+UseSerialGC' \
+            -Pkotlin.compiler.execution.strategy=in-process
           cd ..
           node scripts/collect-action-build.cjs apk "$RUNNER_TEMP/action-build-files/vega-tv.apk"
 
@@ -93,7 +95,9 @@ jobs:
           set -euo pipefail
           chmod +x android/gradlew
           cd android
-          ./gradlew :app:bundleRelease --no-daemon --max-workers=2 --console=plain
+          ./gradlew :app:bundleRelease --no-daemon --max-workers=1 --no-parallel --console=plain --stacktrace \
+            '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -XX:+UseSerialGC' \
+            -Pkotlin.compiler.execution.strategy=in-process
           cd ..
           node scripts/collect-action-build.cjs aab "$RUNNER_TEMP/action-build-files/vega-tv-playstore.aab"
 

@@ -54,6 +54,12 @@ test('main pushes cancel previous runs and use nightly signing for both TV varia
   const aab = job.steps.find(step => step.run?.includes(':app:bundleRelease'));
   assert.equal(apk.env.APP_VARIANT, 'tv');
   assert.equal(aab.env.APP_VARIANT, 'playstore');
+  for (const step of [apk, aab]) {
+    assert.ok(step.run.includes('-Xmx4096m'));
+    assert.ok(step.run.includes('--max-workers=1 --no-parallel'));
+    assert.ok(step.run.includes('-Pkotlin.compiler.execution.strategy=in-process'));
+    assert.ok(step.run.includes('--stacktrace'));
+  }
   assert.equal(job.steps.filter(step => step.run?.includes('expo prebuild')).length, 2);
   assert.equal(job.steps.some(step => step.uses?.includes('upload-artifact')), false);
 });

@@ -44,6 +44,21 @@ jobs:
           log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Install and verify Android CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sdkmanager --install 'cmake;3.22.1' && "$ANDROID_HOME/cmake/3.22.1/bin/cmake" --version; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo 'Android CMake installation failed after three attempts.' >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
       - name: Load nightly signing credentials
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}

@@ -26,7 +26,17 @@ module.exports = () => {
   const APP_SCHEME = IS_PLAYSTORE ? 'vegaapp' : 'com.vega';
   const plugins = [
     './plugins/with-custom-native-modules.js',
-    ...(!IS_TV ? [['expo-camera', {cameraPermission: 'Allow Vega to scan receiver QR codes.', recordAudioAndroid: false}]] : []),
+    ...(!IS_TV
+      ? [
+          [
+            'expo-camera',
+            {
+              cameraPermission: 'Allow Vega to scan receiver QR codes.',
+              recordAudioAndroid: false,
+            },
+          ],
+        ]
+      : []),
     './plugins/android-native-config.js',
     './plugins/with-saf-copy-module.js',
     './plugins/with-uri-permission-module.js',
@@ -156,7 +166,7 @@ module.exports = () => {
           ? {googleServicesFile: androidGoogleServicesFile}
           : {}),
         package: PACKAGE_NAME,
-        versionCode: 208,
+        versionCode: 210,
         permissions: [
           'FOREGROUND_SERVICE',
           'FOREGROUND_SERVICE_DATA_SYNC',
@@ -201,10 +211,14 @@ module.exports = () => {
       },
       platforms: ['ios', 'android'],
       extra: {
-        vegaCastServiceUrl: process.env.VEGA_CAST_SERVICE_URL || 'https://cast.vega-app.in/vega-cast/v1',
+        vegaCastServiceUrl:
+          process.env.VEGA_CAST_SERVICE_URL ||
+          'https://cast.vega-app.in/vega-cast/v1',
         // Optional STUN/TURN servers. Use short-lived TURN credentials in builds;
         // never commit a permanent relay secret. Empty means same-LAN ICE only.
-        vegaCastIceServers: JSON.parse(process.env.VEGA_CAST_ICE_SERVERS || '[]'),
+        vegaCastIceServers: JSON.parse(
+          process.env.VEGA_CAST_ICE_SERVERS || '[]',
+        ),
         eas: {
           projectId: '40d98354-d3c8-4616-ab2e-70d9c297091f',
         },

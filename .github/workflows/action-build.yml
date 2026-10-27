@@ -80,6 +80,7 @@ jobs:
             '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -XX:+UseSerialGC' \
             -Pkotlin.compiler.execution.strategy=in-process
           cd ..
+          python3 scripts/check-tv-device-support.py
           node scripts/collect-action-build.cjs apk "$RUNNER_TEMP/action-build-files/vega-tv.apk"
 
       - name: Generate Play Store TV project
@@ -99,6 +100,7 @@ jobs:
             '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -XX:+UseSerialGC' \
             -Pkotlin.compiler.execution.strategy=in-process
           cd ..
+          python3 scripts/check-tv-device-support.py
           node scripts/collect-action-build.cjs aab "$RUNNER_TEMP/action-build-files/vega-tv-playstore.aab"
 
       # No Actions artifact upload: binaries stay in the draft release only.

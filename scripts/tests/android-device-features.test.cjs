@@ -23,7 +23,7 @@ test('prebuild keeps QR scanning and portrait orientation optional for TV instal
   const config = {modResults: {manifest: {'uses-feature': features, application: []}}};
   configureManifest(config);
   configureManifest(config); // Repeated prebuild must not duplicate requirements.
-  for (const name of ['android.hardware.camera', 'android.hardware.camera.any', 'android.hardware.camera.autofocus', 'android.hardware.touchscreen', 'android.hardware.screen.portrait']) {
+  for (const name of ['android.hardware.camera', 'android.hardware.camera.any', 'android.hardware.camera.autofocus', 'android.hardware.touchscreen', 'android.hardware.screen.portrait', 'android.hardware.microphone', 'android.hardware.wifi']) {
     const matches = features.filter(feature => feature.$['android:name'] === name);
     assert.equal(matches.length, 1, name);
     assert.equal(matches[0].$['android:required'], 'false', name);

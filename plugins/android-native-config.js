@@ -17,6 +17,8 @@ const withAndroidNativeConfig = config => {
       'android.hardware.camera.autofocus',
       'android.hardware.touchscreen',
       'android.hardware.screen.portrait',
+      'android.hardware.microphone',
+      'android.hardware.wifi',
     ]) {
       const feature = manifest['uses-feature'].find(item => item.$?.['android:name'] === name);
       if (feature) feature.$['android:required'] = 'false';

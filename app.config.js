@@ -26,17 +26,13 @@ module.exports = () => {
   const APP_SCHEME = IS_PLAYSTORE ? 'vegaapp' : 'com.vega';
   const plugins = [
     './plugins/with-custom-native-modules.js',
-    ...(!IS_TV
-      ? [
-          [
-            'expo-camera',
-            {
-              cameraPermission: 'Allow Vega to scan receiver QR codes.',
-              recordAudioAndroid: false,
-            },
-          ],
-        ]
-      : []),
+      [
+        'expo-camera',
+        {
+          cameraPermission: 'Allow Vega to scan receiver QR codes.',
+          recordAudioAndroid: false,
+        },
+      ],
     './plugins/android-native-config.js',
     './plugins/with-saf-copy-module.js',
     './plugins/with-uri-permission-module.js',
@@ -166,7 +162,7 @@ module.exports = () => {
           ? {googleServicesFile: androidGoogleServicesFile}
           : {}),
         package: PACKAGE_NAME,
-        versionCode: 213,
+        versionCode: 214,
         permissions: [
           'FOREGROUND_SERVICE',
           'FOREGROUND_SERVICE_DATA_SYNC',
@@ -180,6 +176,8 @@ module.exports = () => {
           'POST_NOTIFICATIONS',
         ],
         blockedPermissions: [
+          // Casting uses WebRTC data channels, not microphone capture.
+          'android.permission.RECORD_AUDIO',
           'android.permission.MANAGE_EXTERNAL_STORAGE',
           'android.permission.READ_EXTERNAL_STORAGE',
           'android.permission.READ_MEDIA_VIDEO',

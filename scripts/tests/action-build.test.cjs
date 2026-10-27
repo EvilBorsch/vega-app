@@ -40,6 +40,8 @@ test('main pushes cancel previous runs and use nightly signing for both TV varia
   const job = workflow.jobs.build;
   assert.equal(job.environment, 'nightly');
   assert.equal(job.env.EXPO_TV, '1');
+  const androidSetup = job.steps.find(step => step.uses === 'android-actions/setup-android@v3');
+  assert.equal(androidSetup.with.packages, 'platform-tools');
   assert.equal(Object.values(job.env).some(value => String(value).includes('runner.')), false);
   const signing = job.steps.find(step => step.name === 'Load nightly signing credentials');
   assert.ok(signing.run.includes('export MYAPP_UPLOAD_STORE_FILE="$RUNNER_TEMP/action-build.keystore"'));

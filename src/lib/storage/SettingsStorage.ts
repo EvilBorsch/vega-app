@@ -11,6 +11,8 @@ import {
 /**
  * Storage keys for settings
  */
+export type VerificationWindowPolicy = 'ask' | 'allow' | 'block';
+
 export enum SettingsKeys {
   // UI preferences
   PRIMARY_COLOR = 'primaryColor',
@@ -30,6 +32,7 @@ export enum SettingsKeys {
   AUTO_CHECK_UPDATE = 'autoCheckUpdate',
   AUTO_DOWNLOAD = 'autoDownload',
   AUTO_UPDATE_PROVIDERS = 'autoUpdateProviders',
+  VERIFICATION_WINDOWS = 'verificationWindows',
 
   // Player settings
   OPEN_VIDEOS_FROM_OTHER_APPS = 'openVideosFromOtherApps',
@@ -185,6 +188,15 @@ const clampBufferMB = (
 };
 
 export class SettingsStorage {
+  getVerificationWindowPolicy(): VerificationWindowPolicy {
+    const value = mainStorage.getString(SettingsKeys.VERIFICATION_WINDOWS);
+    return value === 'allow' || value === 'block' ? value : 'ask';
+  }
+
+  setVerificationWindowPolicy(value: VerificationWindowPolicy): void {
+    mainStorage.setString(SettingsKeys.VERIFICATION_WINDOWS, value);
+  }
+
   isOpenVideosFromOtherAppsEnabled(): boolean {
     return mainStorage.getBool(SettingsKeys.OPEN_VIDEOS_FROM_OTHER_APPS, true);
   }

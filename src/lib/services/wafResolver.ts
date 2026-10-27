@@ -1,3 +1,6 @@
+import {authorizeVerification, VerificationDeniedError} from '../zustand/verificationConsentStore';
+import {extensionStorage} from '../storage/extensionStorage';
+import {providerAbortError, throwIfProviderAborted} from '../sandbox/abort';
 import {providerFetch} from '../sandbox/providerFetch';
 import {base64ToUtf8} from '../sandbox/base64';
 import {headers as commonHeaders} from '../providers/headers';
@@ -11,6 +14,7 @@ import {providerAuthor} from '../sandbox/providerScope';
 import {deleteJarCookie, getJarCookieMap} from '../sandbox/providerCookieJar';
 import {
   canPromptWaf,
+  dismissWafOperation,
   isWafOperationDismissed,
   registerWafOperation,
   wafCancelledError,
@@ -51,7 +55,10 @@ const pendingRequests: Record<string, Promise<OpenWebViewResult>> = {};
 const trackScope = (promise: Promise<OpenWebViewResult>, scope?: AbortSignal) => {
   if (scope) {
     const release = registerWafOperation(scope);
-    promise.then(release, release);
+    promise.then(release, error => {
+      if (error instanceof VerificationDeniedError) dismissWafOperation(scope);
+      release();
+    });
   }
   return promise;
 };
@@ -61,7 +68,9 @@ export const openWebView = (
   options?: OpenWebViewOptions,
   authorRaw?: string,
   scope?: AbortSignal,
+  providerValue?: string,
 ): Promise<OpenWebViewResult> => {
+  if (scope?.aborted) return Promise.reject(providerAbortError());
   if (isWafOperationDismissed(scope)) return Promise.reject(wafCancelledError());
   const author = providerAuthor(authorRaw);
   if (!url) {
@@ -124,15 +133,19 @@ export const openWebView = (
           userAgent,
         };
       }
-    } else if (options?.waitForCookie) {
-      // If it is forced, or if we are about to open the dialog, delete the old cookie
-      // because it is either expired or invalid (caused a 403).
-      deleteJarCookie(author, url, options.waitForCookie);
     }
 
     // Background work fails rather than opening a dialog; a solved cookie
     // above can still be reused.
     if (!canPromptWaf(scope)) throw wafCancelledError();
+
+    const installed = extensionStorage.getInstalledProviders().find(provider =>
+      provider.value === providerValue && providerAuthor(provider.source?.author) === author,
+    );
+    await authorizeVerification(installed?.display_name || providerValue || author, url, scope);
+    throwIfProviderAborted(scope);
+    if (!canPromptWaf(scope) || isWafOperationDismissed(scope)) throw wafCancelledError();
+    if (options?.force && options.waitForCookie) deleteJarCookie(author, url, options.waitForCookie);
 
     return new Promise<OpenWebViewResult>((resolve, reject) => {
       dialogOpened = true;

@@ -217,7 +217,6 @@ export class ExtensionManager {
           disabled: item.disabled || false,
           source: {author: activeSource.author, url: activeSource.url},
           version: item.version,
-          moduleVersionHeader: item.moduleVersionHeader === true,
           icon: item.icon || '',
           type: item.type || 'global',
           hasSettings: Boolean(item.hasSettings),
@@ -256,7 +255,6 @@ export class ExtensionManager {
     version: string,
     path?: string,
     cacheResult = true,
-    requireVersionHeader = false,
   ): Promise<ProviderModule> {
     if (this.testMode) {
       return this.downloadTestProviderModule(providerValue);
@@ -289,7 +287,7 @@ export class ExtensionManager {
               if (typeof response.data !== 'string' || !response.data.trim()) {
                 throw new Error(`Invalid module response: ${fileName}.js`);
               }
-              validateProviderModuleVersion(response.data, providerValue, version, fileName, requireVersionHeader);
+              validateProviderModuleVersion(response.data, providerValue, version, fileName);
               modules[fileName] = response.data;
               break;
             } catch (error) {
@@ -318,7 +316,7 @@ export class ExtensionManager {
       });
 
       await Promise.all(downloadPromises);
-      validateProviderModuleSet(modules, providerValue, version, requireVersionHeader);
+      validateProviderModuleSet(modules, providerValue, version);
 
       // Verify required files were downloaded
       const missingRequired = requiredFiles.filter(file => !modules[file]);
@@ -440,8 +438,6 @@ export class ExtensionManager {
         provider.value,
         provider.version,
         provider.path,
-        true,
-        provider.moduleVersionHeader === true,
       );
 
       // Mark as installed
@@ -481,7 +477,6 @@ export class ExtensionManager {
         provider.version,
         provider.path,
         false,
-        provider.moduleVersionHeader === true,
       );
 
       // Uninstall or source removal during the download takes precedence.

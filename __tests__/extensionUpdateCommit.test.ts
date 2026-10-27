@@ -64,7 +64,7 @@ const stampedCode = (version = '2.0') =>
 it('rejects a stale CDN module and keeps the installed code and version', async () => {
   const manager = new ExtensionManager();
   jest.mocked(axios.get).mockResolvedValue({data: stampedCode('1.0')});
-  await expect(manager.updateProvider({...provider('2.0'), moduleVersionHeader: true}))
+  await expect(manager.updateProvider(provider('2.0')))
     .rejects.toThrow('not synchronized');
   expect(extensionStorage.cacheProviderModules).not.toHaveBeenCalled();
   expect(extensionStorage.installProvider).not.toHaveBeenCalled();
@@ -77,19 +77,18 @@ it('recovers with one fresh request for a stale module', async () => {
     if (String(url).includes('/stream.js')) streamUrls.push(url);
     return {data: stampedCode(String(url).includes('/stream.js') && streamUrls.length === 1 ? '1.0' : '2.0')};
   });
-  expect(await manager.updateProvider({...provider('2.0'), moduleVersionHeader: true})).toBe(true);
+  expect(await manager.updateProvider(provider('2.0'))).toBe(true);
   expect(streamUrls).toHaveLength(2);
   expect(streamUrls[0]).not.toBe(streamUrls[1]);
   expect(axios.get).toHaveBeenCalledTimes(7);
   expect(extensionStorage.installProvider).toHaveBeenCalled();
 });
-it('rejects wholly unstamped stale files when installing a provider that requires stamps', async () => {
+it('allows headerless third-party provider installations', async () => {
   const manager = new ExtensionManager();
   jest.mocked(axios.get).mockResolvedValue({data: 'exports.legacy=true;'});
-  await expect(manager.installProvider({...provider('2.0'), moduleVersionHeader: true}))
-    .rejects.toThrow('missing or invalid version header');
-  expect(extensionStorage.cacheProviderModules).not.toHaveBeenCalled();
-  expect(extensionStorage.installProvider).not.toHaveBeenCalled();
+  await manager.installProvider(provider('2.0'));
+  expect(extensionStorage.cacheProviderModules).toHaveBeenCalled();
+  expect(extensionStorage.installProvider).toHaveBeenCalled();
 });
 it('continues to support wholly unstamped legacy sources', async () => {
   const manager = new ExtensionManager();

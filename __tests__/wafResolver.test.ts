@@ -1,3 +1,5 @@
+jest.mock('../src/lib/zustand/verificationConsentStore', () => ({authorizeVerification: async () => {}, VerificationDeniedError: class extends Error {}}));
+jest.mock('../src/lib/storage/extensionStorage', () => ({extensionStorage: {getInstalledProviders: () => []}}));
 import {beforeEach, describe, expect, it, jest} from '@jest/globals';
 
 const mockFetch = jest.fn<any>();
@@ -76,6 +78,7 @@ describe('openWebView request coalescing', () => {
   it('silently retries after dismissal and does not reopen the dialog', async () => {
     const a = openWebView('https://dismiss.test/a');
     const b = openWebView('https://dismiss.test/b');
+    await flush();
     mockEnqueue.mock.calls[0][0].reject(new Error('WAF_DIALOG_CANCELLED'));
     expect((await a).data).toBe('page https://dismiss.test/a');
     expect((await b).data).toBe('page https://dismiss.test/b');
@@ -86,6 +89,7 @@ describe('openWebView request coalescing', () => {
     mockFetch.mockResolvedValue({status: 403});
     const a = openWebView('https://blocked.test/a');
     const outcome = a.catch(error => error);
+    await flush();
     mockEnqueue.mock.calls[0][0].reject(new Error('WAF_DIALOG_CANCELLED'));
     expect((await outcome).message).toBe('WAF_DIALOG_CANCELLED');
     expect(mockEnqueue).toHaveBeenCalledTimes(1);

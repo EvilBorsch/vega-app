@@ -1,3 +1,5 @@
+jest.mock('../src/lib/zustand/verificationConsentStore', () => ({authorizeVerification: async () => {}, VerificationDeniedError: class extends Error {}}));
+jest.mock('../src/lib/storage/extensionStorage', () => ({extensionStorage: {getInstalledProviders: () => []}}));
 jest.mock('../src/lib/sandbox/providerFetch', () => ({
   providerFetch: jest.fn(async () => { throw new Error('still blocked'); }),
 }));
@@ -24,11 +26,14 @@ import {
   registerWafOperation,
 } from '../src/lib/services/wafSession';
 
+const flush = () => new Promise(resolve => setImmediate(resolve));
+
 afterEach(() => useWafStore.getState().cancelAll());
 
 it('allows later challenges from the same operation after Done succeeds', async () => {
   const scope = new AbortController().signal;
   const first = openWebView('https://done.test/a', undefined, 'alice', scope);
+  await flush();
   const request = useWafStore.getState().requests[0];
   request.resolve({
     data: 'ok',
@@ -40,8 +45,10 @@ it('allows later challenges from the same operation after Done succeeds', async 
   useWafStore.getState().remove(request.id);
   await first;
   const second = openWebView('https://done.test/b', undefined, 'alice', scope);
+  await flush();
   expect(useWafStore.getState().requests).toHaveLength(1);
   const rejection = second.catch(error => error);
+  await flush();
   useWafStore.getState().cancelAll();
   expect((await rejection).message).toBe('WAF_DIALOG_CANCELLED');
 });
@@ -60,6 +67,7 @@ it('dismisses the visible challenge and the entire queue, including other provid
     new AbortController().signal,
   );
   const outcomes = Promise.allSettled([first, second]);
+  await flush();
   expect(useWafStore.getState().requests).toHaveLength(2);
   useWafStore.getState().cancelAll();
   expect(useWafStore.getState().requests).toHaveLength(0);
@@ -74,6 +82,7 @@ it('blocks catch-and-reopen attempts, another URL, and forced dialogs until a fr
   const scope = new AbortController().signal;
   const first = openWebView('https://site.test/a', undefined, 'alice', scope);
   const rejection = first.catch(error => error);
+  await flush();
   useWafStore.getState().cancelAll();
   expect((await rejection).message).toBe('WAF_DIALOG_CANCELLED');
   await expect(
@@ -86,6 +95,7 @@ it('blocks catch-and-reopen attempts, another URL, and forced dialogs until a fr
     'alice',
     new AbortController().signal,
   );
+  await flush();
   expect(useWafStore.getState().requests).toHaveLength(1);
   useWafStore
     .getState()
@@ -118,6 +128,7 @@ it('blocks all coalesced callers, including those with a different invocation sc
   expect(second).not.toBe(first);
   const secondOutcome = second.catch(error => error);
   const outcome = first.catch(error => error);
+  await flush();
   useWafStore.getState().cancelAll();
   expect((await outcome).message).toBe('WAF_DIALOG_CANCELLED');
   expect((await secondOutcome).message).toBe('WAF_DIALOG_CANCELLED');
@@ -171,6 +182,7 @@ it('fails challenges from guarded background work without a dialog until it may 
     'alice',
     scope,
   ).catch(error => error);
+  await flush();
   expect(useWafStore.getState().requests).toHaveLength(1);
   useWafStore.getState().cancelAll();
   expect((await shown).message).toBe('WAF_DIALOG_CANCELLED');

@@ -59,6 +59,7 @@ import GlobalErrorBoundary from './components/GlobalErrorBoundary';
 import notifee, {EventType} from '@notifee/react-native';
 import notificationService from './lib/services/Notification';
 import WafWebViewDialog from './components/WafWebViewDialog';
+import VerificationConsentDialog from './components/VerificationConsentDialog';
 import ProviderSandboxHost from './components/ProviderSandboxHost';
 import {syncDohSettings} from './lib/services/dohService';
 import {syncWarpSettings} from './lib/services/warpService';
@@ -758,6 +759,7 @@ const App = () => {
               </NavigationContainer>
               {/* Global WAF / captcha solving dialog, triggered by providers via
                 providerContext.openWebView */}
+              <VerificationConsentDialog />
               <WafWebViewDialog />
               <RemoteVolumeToast />
               {/* Isolated realm that runs untrusted provider code. Must stay

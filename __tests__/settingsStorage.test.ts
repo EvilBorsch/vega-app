@@ -254,3 +254,20 @@ describe('settings defaults', () => {
     expect(settingsStorage.isDohEnabled()).toBe(false);
   });
 });
+
+
+describe('provider verification window preference', () => {
+  beforeEach(() => mockStringValues.clear());
+  it('asks by default, including when a saved value is invalid', () => {
+    expect(settingsStorage.getVerificationWindowPolicy()).toBe('ask');
+    mockStringValues.set(SettingsKeys.VERIFICATION_WINDOWS, 'unexpected');
+    expect(settingsStorage.getVerificationWindowPolicy()).toBe('ask');
+  });
+  it('persists Ask, Allow and Block', () => {
+    for (const policy of ['allow', 'block', 'ask'] as const) {
+      settingsStorage.setVerificationWindowPolicy(policy);
+      expect(settingsStorage.getVerificationWindowPolicy()).toBe(policy);
+      expect(mockStringValues.get(SettingsKeys.VERIFICATION_WINDOWS)).toBe(policy);
+    }
+  });
+});

@@ -13,6 +13,7 @@ import Constants from 'expo-constants';
 import DownloadLocationPreference from './components/DownloadLocationPreference';
 import useNavigationPreferencesStore from '../../lib/zustand/navigationPreferencesStore';
 import DownloadConcurrencyPreference from './components/DownloadConcurrencyPreference';
+import VerificationWindowPreference from './components/VerificationWindowPreference';
 import TmdbApiKeyPreference from './components/TmdbApiKeyPreference';
 import AppText from '../../components/ui/Text';
 import SettingsSection from '../../components/ui/SettingsSection';
@@ -170,6 +171,7 @@ const Preferences = ({navigation}: any) => {
                 setProviderAutoUpdates(next);
                 if (next) void updateProvidersService.checkForUpdatesAndAutoUpdate().catch(error => console.warn('Provider update check failed:', error));
               }}/>
+            <VerificationWindowPreference />
           </SettingsSection>
           <SettingsSection title="Experience">
             <SettingsSwitchRow

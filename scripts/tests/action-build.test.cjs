@@ -98,3 +98,30 @@ test('a missing build preserves the previous draft and assets', async () => {
   await assert.rejects(updateDraft(f.args), /ENOENT/);
   assert.deepEqual(f.calls, []);
 });
+
+for (const [kind, packageName] of [['apk', 'com.vega'], ['aab', 'vega.app']]) {
+  for (const quote of ["'", '"']) {
+    test(`collector accepts ${kind} with ${quote} quoted applicationId and rejects wrong package`, () => {
+      const {spawnSync} = require('node:child_process');
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vega-collector-'));
+      try {
+        const gradle = path.join(root, 'android/app/build.gradle');
+        const output = path.join(root, 'android/app/build/outputs', kind === 'apk' ? 'apk/release' : 'bundle/release');
+        fs.mkdirSync(output, {recursive: true});
+        fs.writeFileSync(gradle, `android {\n defaultConfig {\n applicationId ${quote}${packageName}${quote}\n }\n}`);
+        fs.writeFileSync(path.join(output, `app-release.${kind}`), 'signed build');
+        const destination = path.join(root, `collected.${kind}`);
+        const script = path.resolve(__dirname, '../collect-action-build.cjs');
+        const result = spawnSync(process.execPath, [script, kind, destination], {cwd: root, encoding: 'utf8'});
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(fs.readFileSync(destination, 'utf8'), 'signed build');
+        fs.writeFileSync(gradle, `applicationId ${quote}wrong.package${quote}`);
+        const rejected = spawnSync(process.execPath, [script, kind, destination], {cwd: root, encoding: 'utf8'});
+        assert.notEqual(rejected.status, 0);
+        assert.match(rejected.stderr, /Wrong package/);
+      } finally {
+        fs.rmSync(root, {recursive: true, force: true});
+      }
+    });
+  }
+}

@@ -7,7 +7,8 @@ const ADD_SOURCE_ACTION = 'vega.intent.action.ADD_SOURCE';
 
 const withAndroidNativeConfig = config => {
   config = withAndroidManifest(config, manifestConfig => {
-    // QR scanning is optional; receivers and TV devices need no camera hardware.
+    // QR scanning is optional. Its Google scanner activity is portrait-only,
+    // which otherwise makes Play filter out landscape-only TVs as well.
     const manifest = manifestConfig.modResults.manifest;
     manifest['uses-feature'] = manifest['uses-feature'] || [];
     for (const name of [
@@ -15,6 +16,7 @@ const withAndroidNativeConfig = config => {
       'android.hardware.camera.any',
       'android.hardware.camera.autofocus',
       'android.hardware.touchscreen',
+      'android.hardware.screen.portrait',
     ]) {
       const feature = manifest['uses-feature'].find(item => item.$?.['android:name'] === name);
       if (feature) feature.$['android:required'] = 'false';

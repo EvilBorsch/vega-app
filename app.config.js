@@ -166,7 +166,7 @@ module.exports = () => {
           ? {googleServicesFile: androidGoogleServicesFile}
           : {}),
         package: PACKAGE_NAME,
-        versionCode: 211,
+        versionCode: 212,
         permissions: [
           'FOREGROUND_SERVICE',
           'FOREGROUND_SERVICE_DATA_SYNC',

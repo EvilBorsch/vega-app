@@ -24,7 +24,6 @@ jobs:
       CI: '1'
       EXPO_TV: '1'
       EXPO_NO_TELEMETRY: '1'
-      MYAPP_UPLOAD_STORE_FILE: ${{ runner.temp }}/action-build.keystore
       MYAPP_UPLOAD_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       MYAPP_UPLOAD_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       MYAPP_UPLOAD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -47,6 +46,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export MYAPP_UPLOAD_STORE_FILE="$RUNNER_TEMP/action-build.keystore"
+          printf 'MYAPP_UPLOAD_STORE_FILE=%s\n' "$MYAPP_UPLOAD_STORE_FILE" >> "$GITHUB_ENV"
           : "${KEYSTORE_BASE64:?Missing nightly KEYSTORE_BASE64 secret}"
           : "${MYAPP_UPLOAD_STORE_PASSWORD:?Missing nightly KEYSTORE_PASSWORD secret}"
           : "${MYAPP_UPLOAD_KEY_ALIAS:?Missing nightly KEY_ALIAS secret}"
@@ -105,4 +106,4 @@ jobs:
       - name: Remove signing file
         if: always()
         shell: bash
-        run: rm -f -- "$MYAPP_UPLOAD_STORE_FILE"
+        run: rm -f -- "$RUNNER_TEMP/action-build.keystore"

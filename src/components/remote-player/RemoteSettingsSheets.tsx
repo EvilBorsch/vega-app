@@ -1,3 +1,5 @@
+import type {SavedSubtitle, SubtitleInput} from '../../lib/subtitles/savedSubtitles';
+import RemovableSubtitleRow from '../RemovableSubtitleRow';
 import {languageLabel} from '../../lib/player/languageLabel';
 import {isRemotePlaybackCanceled} from '../../lib/remote/remotePlaybackErrors';
 import * as DocumentPicker from 'expo-document-picker';
@@ -56,6 +58,9 @@ export type RemoteSheetType =
   | 'episodes';
 
 interface RemoteSettingsSheetsProps {
+  savedSubtitles?: SavedSubtitle[];
+  onAddSavedSubtitle?: (track: SubtitleInput, origin: SavedSubtitle['origin']) => Promise<SavedSubtitle | undefined>;
+  onRemoveSavedSubtitle?: (id: string) => Promise<void>;
   sheetType: RemoteSheetType | null;
   onClose: () => void;
   episodes?: EpisodeLink[];
@@ -278,6 +283,9 @@ const RemoteDelayRow: React.FC<{
 };
 
 export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
+  savedSubtitles = [],
+  onAddSavedSubtitle,
+  onRemoveSavedSubtitle,
   sheetType,
   onClose,
   episodes,
@@ -290,6 +298,7 @@ export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
   subtitleSearchQuery,
 }) => {
   const [searchQuery, setSearchQuery] = useState(subtitleSearchQuery || '');
+  const colors = useM3Colors();
   const servers = useRemoteStore(state => state.servers);
   const activeServerId = useRemoteStore(state => state.activeServerId);
   const audioTracks = useRemoteStore(state => state.audioTracks);
@@ -330,10 +339,24 @@ export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
       });
   };
 
-  const addSubtitle = (track: Pick<FoundSubtitle, 'uri' | 'title' | 'language'>) => {
-    onClose();
-    // The manager reports failures on the remote screen.
-    remotePlaybackManager.addExternalSubtitle(track).catch(() => {});
+  const addSubtitle = async (track: SubtitleInput, origin: SavedSubtitle['origin'] = 'search') => {
+    try {
+      const saved = onAddSavedSubtitle ? await onAddSavedSubtitle(track, origin) : undefined;
+      if (onAddSavedSubtitle && !saved) return; // Episode changed while downloading.
+      onClose();
+      await remotePlaybackManager.addExternalSubtitle(saved ? {...saved, savedSubtitleId: saved.id} : track);
+    } catch (error) {
+      if (!isRemotePlaybackCanceled(error)) useRemoteStore.getState().setErrorMessage(error instanceof Error ? error.message : 'Could not add subtitle');
+    }
+  };
+  const removeSubtitle = async (saved: SavedSubtitle) => {
+    try {
+      const active = useRemoteStore.getState().subtitleTracks.find(sub => sub.id === useRemoteStore.getState().activeSubtitleTrackId);
+      if (active?.uri === saved.uri || active?.savedSubtitleId === saved.id) await remotePlaybackManager.setActiveSubtitleTrack(undefined);
+      await onRemoveSavedSubtitle?.(saved.id);
+      // Keep receiver ordinals stable for the active session. Removed cache rows
+      // are hidden below; the next media load rebuilds the receiver's track list.
+    } catch (error) {useRemoteStore.getState().setErrorMessage(error instanceof Error ? error.message : 'Could not remove subtitle');}
   };
 
   const pickSubtitleFile = async () => {
@@ -354,11 +377,12 @@ export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
       });
       const asset = !res.canceled ? res.assets?.[0] : undefined;
       if (!asset) return;
-      addSubtitle({
+      await addSubtitle({
         uri: asset.uri,
         title: asset.name || 'External subtitle',
         language: 'und',
-      });
+        type: asset.mimeType && !['text/plain', 'application/octet-stream'].includes(asset.mimeType) ? asset.mimeType : undefined,
+      }, 'file');
     } catch (error: any) {
       useRemoteStore
         .getState()
@@ -480,23 +504,34 @@ export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
               selected={!activeSubtitleTrackId}
               onPress={() => select(() => onSelectSubtitle?.(undefined))}
             />
-            {subtitleTracks.map((sub, i) => {
+            {subtitleTracks.filter(sub => !sub.savedSubtitleId || savedSubtitles.some(saved => saved.id === sub.savedSubtitleId)).map((sub, i) => {
               const language = languageLabel(sub.language);
+              const saved = savedSubtitles.find(item => item.uri === sub.uri || item.id === sub.savedSubtitleId);
               return (
+                <RemovableSubtitleRow key={sub.id || i} title={saved?.title || ''}
+                  color={colors.onSurface} onRemove={saved && onRemoveSavedSubtitle ? () => {void removeSubtitle(saved);} : undefined}>
                 <RemoteSheetOption
                   key={sub.id || i}
                   title={languageLabel(sub.title, language || `Subtitle ${i + 1}`)}
                   supportingText={[
                     language,
-                    sub.isEmbedded ? 'Embedded' : 'External',
+                    saved ? (saved.origin === 'search' ? 'Saved search' : 'Saved file') : sub.isEmbedded ? 'Embedded' : 'External',
                   ]
                     .filter(Boolean)
                     .join(' · ')}
                   selected={sub.id === activeSubtitleTrackId}
                   onPress={() => select(() => onSelectSubtitle?.(sub))}
                 />
+                </RemovableSubtitleRow>
               );
             })}
+            {savedSubtitles.filter(saved => !subtitleTracks.some(sub => sub.uri === saved.uri)).map(saved => (
+              <RemovableSubtitleRow key={saved.id} title={saved.title} color={colors.onSurface}
+                onRemove={onRemoveSavedSubtitle ? () => {void removeSubtitle(saved);} : undefined}>
+                <RemoteSheetOption title={saved.title} supportingText={`${languageLabel(saved.language)} · Saved`}
+                  onPress={() => {onClose(); void remotePlaybackManager.addExternalSubtitle({...saved, savedSubtitleId: saved.id}).catch(() => {});}} />
+              </RemovableSubtitleRow>
+            ))}
             <RemoteSheetSectionLabel text="Sync" />
             <RemoteDelayRow
               kind="subtitle"

@@ -34,6 +34,7 @@ export interface RemoteAudioTrack {
 }
 
 export interface RemoteSubtitleTrack {
+  savedSubtitleId?: string;
   id: string;
   index?: number;
   language: string;

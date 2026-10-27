@@ -1812,6 +1812,7 @@ class RemotePlaybackManager {
    * must be copies in the app cache; the phone server serves nothing else.
    */
   async addExternalSubtitle(track: {
+    savedSubtitleId?: string;
     uri: string;
     title?: string;
     language?: string;
@@ -1831,6 +1832,7 @@ class RemotePlaybackManager {
         {
           id,
           uri: track.uri,
+          savedSubtitleId: track.savedSubtitleId,
           title: track.title,
           language: track.language || 'und',
           isEmbedded: false,

@@ -1,3 +1,5 @@
+import {useSavedSubtitles} from './useSavedSubtitles';
+import {savedSubtitleTrack, subtitleVideoKey} from '../subtitles/savedSubtitles';
 import {deduplicateVideoTracks} from '../player/playbackQuality';
 import {externalVideoStream} from '../services/videoIntent';
 import { useQuery } from '@tanstack/react-query';
@@ -588,6 +590,8 @@ export const useStream = ({
   const [externalSubs, setExternalSubs] = useState<any[]>([]);
 
   const activeEpisodeKey = getEpisodeIdentity(activeEpisode);
+  const subtitleCacheKey = subtitleVideoKey(activeEpisode, routeParams, provider);
+  const {savedSubtitles, saveSubtitle, removeSavedSubtitle} = useSavedSubtitles(subtitleCacheKey);
   const subtitleSourcesRef = useRef({episodeKey: activeEpisodeKey, uris: new Set<string>()});
   const activeEpisodeKeyRef = useRef(activeEpisodeKey);
   activeEpisodeKeyRef.current = activeEpisodeKey;
@@ -734,6 +738,9 @@ export const useStream = ({
       }
     });
 
+    const savedTracks = [...savedSubtitles].reverse().map(savedSubtitleTrack).filter(sub =>
+      !mergedSubs.some((managed: any) => managed.uri === sub.uri),
+    );
     const previousSources = subtitleSourcesRef.current;
     subtitleSourcesRef.current = {
       episodeKey: activeEpisodeKey,
@@ -743,15 +750,15 @@ export const useStream = ({
       // Refetching provider streams must not discard subtitles added by the user.
       // Their lifetime is the episode; managed provider/download tracks can refresh.
       const imported = previousSources.episodeKey === activeEpisodeKey
-        ? prev.filter((sub: any) => !previousSources.uris.has(sub.uri)
+        ? prev.filter((sub: any) => !sub.savedSubtitleId && !previousSources.uris.has(sub.uri)
           && !mergedSubs.some((managed: any) => managed.uri === sub.uri))
         : [];
-      const next = [...mergedSubs, ...imported];
+      const next = [...mergedSubs, ...savedTracks, ...imported];
       const prevKey = prev.map((s: any) => s.uri || '').join('|');
       const nextKey = next.map((s: any) => s.uri || '').join('|');
       return prevKey === nextKey ? prev : next;
     });
-  }, [streamData, activeEpisodeKey]);
+  }, [streamData, activeEpisodeKey, subtitleCacheKey, savedSubtitles]);
 
   // Handle errors
   useEffect(() => {
@@ -815,6 +822,9 @@ export const useStream = ({
     setSelectedStream,
     externalSubs,
     setExternalSubs,
+    savedSubtitles,
+    saveSubtitle,
+    removeSavedSubtitle,
     isLoading: isLoading && !isPlayingLocal,
     error: isPlayingLocal ? null : error,
     refetch,

@@ -1,3 +1,5 @@
+import {findSavedSubtitle, savedSubtitleLabel} from '../../lib/subtitles/savedSubtitles';
+import RemovableSubtitleRow from '../../components/RemovableSubtitleRow';
 import {getPlaybackQuality} from '../../lib/player/playbackQuality';
 import {localContentId} from '../../lib/localContent/library';
 import useLocalContentStore from '../../lib/zustand/localContentStore';
@@ -867,7 +869,9 @@ const Player = ({route}: Props): React.JSX.Element => {
     selectedStream,
     setSelectedStream,
     externalSubs,
-    setExternalSubs,
+    savedSubtitles,
+    saveSubtitle,
+    removeSavedSubtitle,
     isLoading: streamLoading,
     error: streamError,
     refreshLinks,
@@ -2269,9 +2273,10 @@ const Player = ({route}: Props): React.JSX.Element => {
     (externalSubs || []).forEach((sub: any, i: number) => {
       if (sub?.uri) {
         allSubs.push({
-          id: `ext_${i}_${sub.uri}`,
+          id: sub.savedSubtitleId ? `saved_${sub.savedSubtitleId}` : `ext_${i}_${sub.uri}`,
+          savedSubtitleId: sub.savedSubtitleId,
           language: sub.language || 'und',
-          title: sub.title || sub.language || `Subtitle ${i + 1}`,
+          title: savedSubtitles.find(saved => saved.id === sub.savedSubtitleId)?.title || sub.title || sub.language || `Subtitle ${i + 1}`,
           uri: sub.uri,
           isEmbedded: false,
         });
@@ -2296,6 +2301,7 @@ const Player = ({route}: Props): React.JSX.Element => {
 
     if (Array.isArray(textTracks)) {
       textTracks.forEach((t: any, i: number) => {
+        if (findSavedSubtitle(t, savedSubtitles)) return;
         const lang = t.language && t.language !== 'und' ? t.language : '';
         allSubs.push({
           id: `track_${t.index ?? i}`,
@@ -2307,7 +2313,12 @@ const Player = ({route}: Props): React.JSX.Element => {
     }
 
     const currentSubs = useRemoteStore.getState().subtitleTracks;
-    if (
+    if (currentSubs.length > 0 && (allSubs.some(sub => sub.savedSubtitleId) || currentSubs.some(sub => sub.savedSubtitleId))) {
+      // Receivers keep track ordinals in already-issued URLs. Add cached tracks
+      // at the end and retain the active session's ordering when one is removed.
+      const additions = allSubs.filter(sub => sub.savedSubtitleId && !currentSubs.some(current => current.uri === sub.uri));
+      if (additions.length) useRemoteStore.getState().setSubtitleTracks([...currentSubs, ...additions]);
+    } else if (
       allSubs.length > 0 &&
       (currentSubs.length === 0 || allSubs.length >= currentSubs.length)
     ) {
@@ -2323,6 +2334,7 @@ const Player = ({route}: Props): React.JSX.Element => {
     audioTracks,
     selectedAudioTrackIndex,
     externalSubs,
+    savedSubtitles,
     textTracks,
     selectedTextTrackIndex,
   ]);
@@ -2438,9 +2450,10 @@ const Player = ({route}: Props): React.JSX.Element => {
         externalSubs.forEach((sub: any, i: number) => {
           if (sub?.uri) {
             remoteSubtitles.push({
-              id: `ext_${i}_${sub.uri}`,
+              id: sub.savedSubtitleId ? `saved_${sub.savedSubtitleId}` : `ext_${i}_${sub.uri}`,
+              savedSubtitleId: sub.savedSubtitleId,
               language: sub.language || 'und',
-              title: sub.title || sub.language || `Subtitle ${i + 1}`,
+              title: savedSubtitles.find(saved => saved.id === sub.savedSubtitleId)?.title || sub.title || sub.language || `Subtitle ${i + 1}`,
               uri: sub.uri,
               isEmbedded: false,
             });
@@ -2913,6 +2926,8 @@ const Player = ({route}: Props): React.JSX.Element => {
     (e: any) => {
       const tracks = e?.textTracks || [];
       setTextTracks(tracks);
+      const selectedSaved = tracks.find((track: any) => track.selected && track.title?.startsWith('vega-saved-subtitle:'));
+      if (selectedSaved) {setSelectedTextTrackIndex(selectedSaved.index); return;}
       if (selectedTextTrackIndexRef.current === 1000 && tracks.length > 0) {
         const downloadedTrack = tracks.find(
           (t: any) =>
@@ -3587,6 +3602,9 @@ const Player = ({route}: Props): React.JSX.Element => {
       {/* Local or Remote player */}
       {isRemoteActive ? (
         <RemotePlayerScreen
+          savedSubtitles={savedSubtitles}
+          onAddSavedSubtitle={saveSubtitle}
+          onRemoveSavedSubtitle={removeSavedSubtitle}
           title={route.params?.primaryTitle}
           subtitle={activeEpisode?.title || route.params?.secondaryTitle}
           poster={route.params?.poster?.poster}
@@ -4137,6 +4155,18 @@ const Player = ({route}: Props): React.JSX.Element => {
                     }
                     ListFooterComponent={
                       <>
+                        {savedSubtitles.filter(saved => !textTracks.some(track => findSavedSubtitle(track, [saved]))).map(saved => (
+                          <RemovableSubtitleRow key={saved.id} title={saved.title}
+                            onTVFocus={() => setSettingsCloseFocused(false)}
+                            onRemove={() => {void removeSavedSubtitle(saved.id).catch(error => setToast(error.message, 4000));}}>
+                            <PlayerMenuRow title={languageLabel(saved.language, 'Unknown')} detail={`${saved.title} · Saved`}
+                              icon="subtitles" accentColor={primary} onTVFocus={() => setSettingsCloseFocused(false)}
+                              onPress={() => {
+                                setSelectedTextTrack({type: SelectedTrackType.TITLE, value: savedSubtitleLabel(saved.id)});
+                                setShowSettings(false);
+                              }} />
+                          </RemovableSubtitleRow>
+                        ))}
                         <PlayerMenuRow
                           onTVFocus={() => setSettingsCloseFocused(false)}
                           title="Add external file"
@@ -4153,6 +4183,7 @@ const Player = ({route}: Props): React.JSX.Element => {
                                     'application/ttml+xml',
                                   ],
                                   multiple: false,
+                                  copyToCacheDirectory: true,
                                 },
                               );
 
@@ -4182,33 +4213,41 @@ const Player = ({route}: Props): React.JSX.Element => {
 
                                 const track = {
                                   type: trackType,
-                                  title:
-                                    asset.name && asset.name.length > 20
-                                      ? asset.name.slice(0, 20) + '...'
-                                      : asset.name || 'External Subtitle',
+                                  title: asset.name || 'External Subtitle',
                                   language: 'und',
                                   uri: asset.uri,
                                 };
-                                setExternalSubs((prev: any) => [
-                                  track,
-                                  ...prev,
-                                ]);
+                                await saveSubtitle(track, 'file');
                               }
                             } catch (err) {
-                              console.log(err);
+                              setToast(err instanceof Error ? err.message : 'Could not save subtitle', 4000);
                             }
                           }}
                         />
                         <SearchSubtitles
                           searchQuery={searchQuery}
                           setSearchQuery={setSearchQuery}
-                          onAddSubtitle={track =>
-                            setExternalSubs(prev => [track, ...prev])
-                          }
+                          onAddSubtitle={track => {
+                            void saveSubtitle(track, 'search').catch(error => setToast(error.message || 'Could not save subtitle', 4000));
+                          }}
                         />
                       </>
                     }
-                    renderItem={({item: track}) => (
+                    renderItem={({item: track}) => {
+                      const saved = findSavedSubtitle(track, savedSubtitles);
+                      return <RemovableSubtitleRow title={saved?.title || ''}
+                        onTVFocus={() => setSettingsCloseFocused(false)}
+                        onRemove={saved ? () => {
+                          if (selectedTextTrackIndex === track.index) {
+                            setSelectedTextTrack({type: SelectedTrackType.DISABLED});
+                            setSelectedTextTrackIndex(1000);
+                          } else if (selectedTextTrackIndex !== 1000) {
+                            const current = textTracks.find(item => item.index === selectedTextTrackIndex);
+                            if (current?.title) setSelectedTextTrack({type: SelectedTrackType.TITLE, value: current.title});
+                            if (track.index < selectedTextTrackIndex) setSelectedTextTrackIndex(selectedTextTrackIndex - 1);
+                          }
+                          void removeSavedSubtitle(saved.id).catch(error => setToast(error.message, 4000));
+                        } : undefined}>
                       <PlayerMenuRow
                         onTVFocus={() => setSettingsCloseFocused(false)}
                         ref={
@@ -4217,7 +4256,7 @@ const Player = ({route}: Props): React.JSX.Element => {
                             : undefined
                         }
                         title={languageLabel(track.language, 'Unknown')}
-                        detail={[track.type, track.title]
+                        detail={[saved ? (saved.origin === 'search' ? 'Saved search' : 'Saved file') : track.type, saved?.title || track.title]
                           .filter(Boolean)
                           .join(' · ')}
                         selected={selectedTextTrackIndex === track.index}
@@ -4239,7 +4278,8 @@ const Player = ({route}: Props): React.JSX.Element => {
                           setShowSettings(false);
                         }}
                       />
-                    )}
+                      </RemovableSubtitleRow>;
+                    }}
                   />
                 )}
 

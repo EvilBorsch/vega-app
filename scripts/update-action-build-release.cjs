@@ -4,13 +4,15 @@ const path = require('node:path');
 module.exports = async ({github, context, core, artifactDirectory}) => {
   const repo = context.repo;
   const tag = 'action-build';
+  const apkName = readFileSync(path.join(artifactDirectory, 'apk-name.txt'), 'utf8').trim();
+  if (!/^vega-v[0-9][a-zA-Z0-9.+_-]*\.apk$/.test(apkName)) throw new Error('Invalid generated APK name');
   const assets = [
-    {name: 'vega-tv.apk', type: 'application/vnd.android.package-archive'},
+    {name: apkName, file: 'vega-tv.apk', type: 'application/vnd.android.package-archive'},
     {name: 'vega-tv-playstore.aab', type: 'application/octet-stream'},
   ];
   // Both outputs must exist before touching the previous successful draft.
   for (const asset of assets) {
-    if (!statSync(path.join(artifactDirectory, asset.name)).size) throw new Error(`Empty build: ${asset.name}`);
+    if (!statSync(path.join(artifactDirectory, asset.file || asset.name)).size) throw new Error(`Empty build: ${asset.name}`);
   }
   const assertLatest = async () => {
     const {data} = await github.rest.git.getRef({...repo, ref: 'heads/main'});
@@ -23,18 +25,18 @@ module.exports = async ({github, context, core, artifactDirectory}) => {
   const metadata = {
     ...repo, tag_name: tag, name: 'Action build', draft: true, prerelease: true,
     target_commitish: context.sha,
-    body: `Latest successful main build.\n\nCommit: ${context.sha}\nRun: ${context.serverUrl}/${repo.owner}/${repo.repo}/actions/runs/${context.runId}\n\nBoth builds support TV.\n- vega-tv.apk: com.vega\n- vega-tv-playstore.aab: vega.app (Play Store)\n`,
+    body: `Latest successful main build.\n\nCommit: ${context.sha}\nRun: ${context.serverUrl}/${repo.owner}/${repo.repo}/actions/runs/${context.runId}\n`,
   };
   if (!release) release = (await github.rest.repos.createRelease(metadata)).data;
   const currentAssets = await github.paginate(github.rest.repos.listReleaseAssets, {...repo, release_id: release.id, per_page: 100});
   for (const asset of assets) {
     await assertLatest();
-    for (const previous of currentAssets.filter(item => item.name === asset.name)) {
+    for (const previous of currentAssets.filter(item => item.name === asset.name || (asset.file === 'vega-tv.apk' && (item.name === 'vega-tv.apk' || /^vega-v.*\.apk$/.test(item.name))))) {
       await github.rest.repos.deleteReleaseAsset({...repo, asset_id: previous.id});
     }
     await github.rest.repos.uploadReleaseAsset({
       ...repo, release_id: release.id, name: asset.name,
-      data: readFileSync(path.join(artifactDirectory, asset.name)),
+      data: readFileSync(path.join(artifactDirectory, asset.file || asset.name)),
       headers: {'content-type': asset.type},
     });
   }

@@ -9,6 +9,7 @@ const updateDraft = require('../update-action-build-release.cjs');
 function fixture({draft = true, existing = true, latest = 'commit', missingAab = false} = {}) {
   const artifactDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'vega-action-build-'));
   fs.writeFileSync(path.join(artifactDirectory, 'vega-tv.apk'), 'apk');
+  fs.writeFileSync(path.join(artifactDirectory, 'apk-name.txt'), 'vega-v5.3.0.apk');
   if (!missingAab) fs.writeFileSync(path.join(artifactDirectory, 'vega-tv-playstore.aab'), 'aab');
   const calls = [], release = {id: 12, draft, tag_name: 'action-build'};
   const record = name => async args => {calls.push([name, args]); return {data: release};};
@@ -55,6 +56,7 @@ test('main pushes cancel previous runs and use nightly signing for both TV varia
   assert.equal(apk.env.APP_VARIANT, 'tv');
   assert.equal(aab.env.APP_VARIANT, 'playstore');
   for (const step of [apk, aab]) {
+    assert.ok(step.run.includes('--build-cache'));
     assert.ok(step.run.includes('-Xmx4096m'));
     assert.ok(step.run.includes('--max-workers=1 --no-parallel'));
     assert.ok(step.run.includes('-Pkotlin.compiler.execution.strategy=in-process'));
@@ -68,8 +70,10 @@ test('reuses the existing draft and replaces both fixed asset names', async () =
   const f = fixture(); await updateDraft(f.args);
   assert.equal(f.calls.filter(([name]) => name === 'create').length, 0);
   assert.deepEqual(f.calls.filter(([name]) => name === 'delete').map(([, args]) => args.asset_id), [21, 22]);
-  assert.deepEqual(f.calls.filter(([name]) => name === 'upload').map(([, args]) => args.name), ['vega-tv.apk', 'vega-tv-playstore.aab']);
+  assert.deepEqual(f.calls.filter(([name]) => name === 'upload').map(([, args]) => args.name), ['vega-v5.3.0.apk', 'vega-tv-playstore.aab']);
   const metadata = f.calls.find(([name]) => name === 'update')[1];
+  assert.equal(metadata.body.includes('Both builds support TV'), false);
+  assert.equal(metadata.body.includes('com.vega'), false);
   assert.equal(metadata.draft, true); assert.equal(metadata.name, 'Action build');
   assert.equal(metadata.release_id, 12); assert.equal(metadata.target_commitish, 'commit');
 });

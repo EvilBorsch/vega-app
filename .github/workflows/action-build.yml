@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           chmod +x android/gradlew
           cd android
-          ./gradlew :app:assembleRelease --no-daemon --max-workers=1 --no-parallel --console=plain --stacktrace \
+          ./gradlew :app:assembleRelease --build-cache --no-daemon --max-workers=1 --no-parallel --console=plain --stacktrace \
             '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -XX:+UseSerialGC' \
             -Pkotlin.compiler.execution.strategy=in-process
           cd ..
@@ -95,7 +95,7 @@ jobs:
           set -euo pipefail
           chmod +x android/gradlew
           cd android
-          ./gradlew :app:bundleRelease --no-daemon --max-workers=1 --no-parallel --console=plain --stacktrace \
+          ./gradlew :app:bundleRelease --build-cache --no-daemon --max-workers=1 --no-parallel --console=plain --stacktrace \
             '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=768m -XX:+UseSerialGC' \
             -Pkotlin.compiler.execution.strategy=in-process
           cd ..

@@ -14,4 +14,5 @@ const files = fs.readdirSync(folder).filter(name => name.endsWith(`.${kind}`) &&
 // The release plugin builds one universal ARM APK; fail instead of choosing an ABI at random.
 if (files.length !== 1) throw new Error(`Expected one signed ${kind.toUpperCase()}, found ${files.length}`);
 fs.copyFileSync(path.join(folder, files[0]), destination);
+if (kind === 'apk') fs.writeFileSync(path.join(path.dirname(destination), 'apk-name.txt'), files[0]);
 console.log(`Prepared ${path.basename(destination)}`);

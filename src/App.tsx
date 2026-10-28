@@ -136,6 +136,7 @@ export type RootStackParamList = {
     alwaysCast?: boolean;
     // Plays first, before online servers load (an unfinished download).
     initialStream?: Stream;
+    playbackMode?: 'play' | 'resume';
   };
 };
 

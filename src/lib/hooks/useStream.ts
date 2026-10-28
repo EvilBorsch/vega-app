@@ -16,6 +16,7 @@ import useDownloadsStore, {
 import { TextTrackType } from 'react-native-video';
 import { downloadOutputExists } from '../downloadDestination';
 import {guardWafPrompts} from '../services/wafSession';
+import {findRememberedServer, rememberedServerKey, rememberServer} from '../player/rememberedServer';
 
 interface UseStreamOptions {
   activeEpisode: any;
@@ -590,6 +591,15 @@ export const useStream = ({
   const [externalSubs, setExternalSubs] = useState<any[]>([]);
 
   const activeEpisodeKey = getEpisodeIdentity(activeEpisode);
+  const serverKey = rememberedServerKey(activeEpisode, routeParams, provider);
+  const isMovie = routeParams?.type === 'movie';
+  const selectStream = useCallback((selection: React.SetStateAction<Stream>) => {
+    setSelectedStream(current => {
+      const next = typeof selection === 'function' ? selection(current) : selection;
+      rememberServer(serverKey, next);
+      return next;
+    });
+  }, [serverKey]);
   const subtitleCacheKey = subtitleVideoKey(activeEpisode, routeParams, provider);
   const {savedSubtitles, saveSubtitle, removeSavedSubtitle} = useSavedSubtitles(subtitleCacheKey);
   const subtitleSourcesRef = useRef({episodeKey: activeEpisodeKey, uris: new Set<string>()});
@@ -633,6 +643,7 @@ export const useStream = ({
   const {
     data: fetchedStreams = [],
     isLoading,
+    isFetching,
     error,
     refetch,
   } = useQuery<Stream[], Error>({
@@ -687,7 +698,12 @@ export const useStream = ({
       const failedDownload = localFailed && (
         isLocalPath(current?.link) || current?.link === initialStreamLink
       );
-      if (!current?.link) return streamData[0] || current;
+      if (!current?.link) {
+        if (isMovie && isFetching) return current;
+        const remembered = routeParams?.playbackMode === 'resume'
+          ? findRememberedServer(serverKey, streamData) : undefined;
+        return remembered || (isMovie ? current : streamData[0] || current);
+      }
       if (failedDownload) {
         return streamData[0] || (error
           ? {server: '', link: '', type: ''}
@@ -696,11 +712,14 @@ export const useStream = ({
       // A user-picked local file is independent of the online server list.
       if (current.type === 'local' || isLocalPath(current.link)) return current;
       if (!streamData.length) return current;
+      if (isMovie && !streamData.some(stream => stream.link === current.link)) {
+        return findRememberedServer(serverKey, streamData) || {server: '', link: '', type: ''};
+      }
       return streamData.some(stream => stream.link === current.link)
         ? current
         : findSameServer(streamData, current) || streamData[0];
     });
-  }, [streamData, localFailed, initialStreamLink, error]);
+  }, [streamData, localFailed, initialStreamLink, error, isMovie, isFetching, routeParams?.playbackMode, serverKey]);
 
   const isPlayingLocal = isLocalPath(selectedStream?.link);
 
@@ -819,13 +838,14 @@ export const useStream = ({
   return {
     streamData,
     selectedStream,
-    setSelectedStream,
+    setSelectedStream: selectStream,
+    requiresServerSelection: isMovie && !selectedStream.link && !error,
     externalSubs,
     setExternalSubs,
     savedSubtitles,
     saveSubtitle,
     removeSavedSubtitle,
-    isLoading: isLoading && !isPlayingLocal,
+    isLoading: (isLoading || (isMovie && !selectedStream.link && isFetching)) && !isPlayingLocal,
     error: isPlayingLocal ? null : error,
     refetch,
     refreshLinks,

@@ -1,5 +1,6 @@
 import {findSavedSubtitle, savedSubtitleLabel} from '../../lib/subtitles/savedSubtitles';
 import RemovableSubtitleRow from '../../components/RemovableSubtitleRow';
+import MovieServerDialog from '../../components/MovieServerDialog';
 import {getPlaybackQuality} from '../../lib/player/playbackQuality';
 import {localContentId} from '../../lib/localContent/library';
 import useLocalContentStore from '../../lib/zustand/localContentStore';
@@ -868,6 +869,7 @@ const Player = ({route}: Props): React.JSX.Element => {
     streamData,
     selectedStream,
     setSelectedStream,
+    requiresServerSelection,
     externalSubs,
     savedSubtitles,
     saveSubtitle,
@@ -3507,6 +3509,20 @@ const Player = ({route}: Props): React.JSX.Element => {
         </View>
       </SafeAreaView>
     );
+  }
+
+  // Keep both the local player and receiver screen unmounted until the user
+  // chooses a movie server. No torrent is resolved while this dialog is open.
+  if (requiresServerSelection && localDecision === 'online') {
+    return <SafeAreaView style={{flex: 1, backgroundColor: '#000'}}>
+      <OrientationLocker orientation={PORTRAIT} />
+      <MovieServerDialog
+        streams={streamData}
+        loading={streamLoading}
+        onSelect={setSelectedStream}
+        onDismiss={() => {exitFullScreen(); navigation.goBack();}}
+      />
+    </SafeAreaView>;
   }
 
   // Show loading state

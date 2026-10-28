@@ -3,18 +3,21 @@ package com.vega
 import android.content.Context
 import android.util.Log
 import android.net.Uri
-import com.arthenica.ffmpegkit.FFmpegKit
+import android.os.ParcelFileDescriptor
 import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFmpegSession
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileInputStream
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import java.io.InputStream
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -69,6 +72,9 @@ class FFmpegMp4Packager(
         // How far past the produced data a reconnect may ask and still wait for it.
         private const val MAX_FORWARD_BYTES = 8L * 1024 * 1024
         private const val IDLE_CLOSE_MS = 60_000L
+        private val cancellationExecutor = Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "remux-cancel").apply { isDaemon = true }
+        }
     }
 
     private val outputs = CopyOnWriteArrayList<LiveOutput>()
@@ -77,6 +83,7 @@ class FFmpegMp4Packager(
         private set
 
     /** Keep buffered bytes/URLs for the receiver handover, but stop fetching the source. */
+    @Synchronized
     fun retire() {
         retired = true
         outputs.forEach { it.retire() }
@@ -292,19 +299,22 @@ class FFmpegMp4Packager(
 
     private data class ActiveStream(
         val sessionId: Long,
-        val pipePath: String,
         val session: FFmpegSession,
-        val fileStream: FileInputStream,
+        val fileStream: InputStream,
         val startSeconds: Double,
         val failure: AtomicReference<String?>,
-        val completion: CompletableFuture<Unit>
+        val completion: CompletableFuture<Unit>,
+        val cleaned: AtomicBoolean = AtomicBoolean(false)
     )
 
     private val activeStreams = CopyOnWriteArrayList<ActiveStream>()
     private val closed = AtomicBoolean(false)
+    // A cold torrent may need to fetch a distant resume piece and the MKV index.
+    // Preparation stays on the phone until media exists; the TV need not wait.
+    private val startupTimeoutMs = if (Uri.parse(sourceUrl).host in listOf("127.0.0.1", "localhost", "::1")) 120_000L else 25_000L
 
     /**
-     * Starts an FFmpeg remuxing process producing fragmented MP4 to a named pipe,
+     * Starts an FFmpeg remuxing process producing fragmented MP4 to an anonymous pipe,
      * and returns an [InputStream] reading from that pipe.
      *
      * @param startSeconds Keyframe seek position in seconds (0.0 for start).
@@ -325,9 +335,6 @@ class FFmpegMp4Packager(
             val oldest = activeStreams.firstOrNull() ?: break
             cleanupStream(oldest)
         }
-
-        val pipePath = FFmpegKitConfig.registerNewFFmpegPipe(context)
-            ?: throw IllegalStateException("Failed to register FFmpeg pipe")
 
         val args = mutableListOf<String>()
 
@@ -367,6 +374,8 @@ class FFmpegMp4Packager(
                 target.add("1")
                 target.add("-reconnect_delay_max")
                 target.add("5")
+                target.add("-rw_timeout")
+                target.add((startupTimeoutMs * 1000).toString())
                 // HLS-demuxer option only: FFmpeg rejects it for a plain MP4/MKV input.
                 if (sourceUrl.contains(".m3u8", ignoreCase = true)) {
                     target.add("-seg_max_retry")
@@ -452,40 +461,69 @@ class FFmpegMp4Packager(
         args.add("-avoid_negative_ts")
         args.add("make_zero")
 
-        // Output to named pipe
+        // Both ends exist before FFmpeg starts. Unlike a named FIFO, opening
+        // pipe:<fd> cannot block waiting for a reader during stop/restart.
+        val pipe = ParcelFileDescriptor.createPipe()
+        val readPipe = pipe[0]
+        val writePipe = pipe[1]
         args.add("-y")
-        args.add(pipePath)
+        args.add("pipe:${writePipe.fd}")
 
         VegaLog.i(TAG, "Starting FFmpeg remux at ${startSeconds}s [audio: transcode aac 192k]")
 
         val prematureEndWarning = AtomicBoolean(false)
         val failure = AtomicReference<String?>(null)
         val completion = CompletableFuture<Unit>()
-        val session = FFmpegKit.executeWithArgumentsAsync(
+        val descriptor = readPipe.fileDescriptor
+        try {
+            Os.fcntlInt(descriptor, OsConstants.F_SETFL,
+                Os.fcntlInt(descriptor, OsConstants.F_GETFL, 0) or OsConstants.O_NONBLOCK)
+        } catch (e: Exception) {
+            readPipe.close()
+            writePipe.close()
+            throw java.io.IOException("Cannot open FFmpeg output pipe", e)
+        }
+        val fileStream = RemuxPipeInputStream(
+            readAvailable = { bytes, offset, length ->
+                try { Os.read(descriptor, bytes, offset, length) }
+                catch (e: ErrnoException) {
+                    if (e.errno == OsConstants.EAGAIN || e.errno == OsConstants.EINTR) 0
+                    else throw java.io.IOException("Cannot read FFmpeg output pipe", e)
+                }
+            },
+            waitForData = { Thread.sleep(20) },
+            finished = { completion.isDone },
+            failure = { failure.get() },
+            release = { readPipe.close() },
+            startupTimeoutMs = startupTimeoutMs,
+        )
+        val session = FFmpegSession.create(
             args.toTypedArray(),
             { completedSession ->
-                val returnCode = completedSession.returnCode
-                // FFmpeg can recover from an EOF warning while probing the MKV tail.
-                // Judge truncation after processing ends, never while bytes still flow.
-                if (ReturnCode.isSuccess(returnCode) && RemuxCompletionPolicy.endedEarly(
-                        prematureEndWarning.get(), (durationSeconds - startSeconds) * 1000.0,
-                        completedSession.lastReceivedStatistics?.time)) {
-                    failure.compareAndSet(null, "Video stream ended unexpectedly. Refresh the link or try another server.")
-                }
-                if (ReturnCode.isSuccess(returnCode) && failure.get() == null) {
-                    VegaLog.i(TAG, "FFmpeg remux session completed successfully")
-                } else if (ReturnCode.isSuccess(returnCode)) {
-                    VegaLog.w(TAG, "FFmpeg ended with a delivery failure: ${failure.get()}")
-                } else if (ReturnCode.isCancel(returnCode)) {
-                    VegaLog.i(TAG, "FFmpeg remux session cancelled")
-                } else {
-                    failure.compareAndSet(null, "Video processing failed. Refresh the link or try another server.")
-                    VegaLog.w(TAG, "FFmpeg remux session failed with code $returnCode: ${completedSession.failStackTrace}")
-                    VegaLog.w(TAG, "FFmpeg session output: ${completedSession.allLogsAsString}")
-                    // Unblock any waiting reader in background daemon so this thread never blocks
-                    unblockPipeAsync(pipePath)
-                }
-                completion.complete(Unit)
+                // FFmpeg duplicates the numeric descriptor. Keep our original
+                // alive until it finishes, including while the run is queued.
+                try { writePipe.close() } catch (_: Exception) {}
+                try {
+                    val returnCode = completedSession.returnCode
+                    // FFmpeg can recover from an EOF warning while probing the MKV tail.
+                    // Judge truncation after processing ends, never while bytes still flow.
+                    if (ReturnCode.isSuccess(returnCode) && RemuxCompletionPolicy.endedEarly(
+                            prematureEndWarning.get(), (durationSeconds - startSeconds) * 1000.0,
+                            completedSession.lastReceivedStatistics?.time)) {
+                        failure.compareAndSet(null, "Video stream ended unexpectedly. Refresh the link or try another server.")
+                    }
+                    if (ReturnCode.isSuccess(returnCode) && failure.get() == null) {
+                        VegaLog.i(TAG, "FFmpeg remux session completed successfully")
+                    } else if (ReturnCode.isSuccess(returnCode)) {
+                        VegaLog.w(TAG, "FFmpeg ended with a delivery failure: ${failure.get()}")
+                    } else if (ReturnCode.isCancel(returnCode)) {
+                        VegaLog.i(TAG, "FFmpeg remux session cancelled")
+                    } else {
+                        failure.compareAndSet(null, "Video processing failed. Refresh the link or try another server.")
+                        VegaLog.w(TAG, "FFmpeg remux session failed with code $returnCode: ${completedSession.failStackTrace}")
+                        VegaLog.w(TAG, "FFmpeg session output: ${completedSession.allLogsAsString}")
+                    }
+                } finally { completion.complete(Unit) }
             },
             { log ->
                 val status = Regex("HTTP error (403|429)").find(log.message)?.groupValues?.get(1)?.toIntOrNull()
@@ -502,27 +540,24 @@ class FFmpegMp4Packager(
             null
         )
 
-        // Open pipe for reading. CompletableFuture with timeout prevents hanging if FFmpeg fails to launch.
-        val future = CompletableFuture.supplyAsync {
-            FileInputStream(File(pipePath))
-        }
-        val fileStream = try {
-            future.get(25, TimeUnit.SECONDS)
-        } catch (e: Exception) {
-            future.cancel(true)
-            session.cancel()
-            // Asynchronously unblock worker thread so this thread never blocks on FIFO open
-            unblockPipeAsync(pipePath)
-            try {
-                FFmpegKitConfig.closeFFmpegPipe(pipePath)
-            } catch (_: Exception) {}
-            throw java.io.IOException("Failed or timed out connecting to FFmpeg pipe: ${e.message}", e)
-        }
-        val activeStream = ActiveStream(session.sessionId, pipePath, session, fileStream, startSeconds, failure, completion)
-        activeStreams.add(activeStream)
-        if (closed.get() || retired) {
-            cleanupStream(activeStream)
-            throw java.io.IOException("Stream Closed")
+        val activeStream = ActiveStream(session.sessionId, session, fileStream, startSeconds, failure, completion)
+        // Publish ownership before the session can block on input probing. A
+        // simultaneous stop must cancel this startup as well as active readers.
+        synchronized(this) {
+            activeStreams.add(activeStream)
+            if (closed.get() || retired) {
+                writePipe.close()
+                completion.complete(Unit)
+                cleanupStream(activeStream)
+                throw java.io.IOException("Stream Closed")
+            }
+            try { FFmpegKitConfig.asyncFFmpegExecute(session) }
+            catch (e: Exception) {
+                writePipe.close()
+                completion.complete(Unit)
+                cleanupStream(activeStream)
+                throw e
+            }
         }
 
         return createPatchedInputStream(activeStream, startSeconds)
@@ -751,24 +786,18 @@ class FFmpegMp4Packager(
     }
 
     private fun cleanupStream(stream: ActiveStream) {
+        if (!stream.cleaned.compareAndSet(false, true)) return
         try {
             stream.fileStream.close()
         } catch (_: Exception) {}
 
-        try {
-            if (!stream.session.state.name.equals("COMPLETED", ignoreCase = true) &&
-                !stream.session.state.name.equals("FAILED", ignoreCase = true)
-            ) {
-                stream.session.cancel()
-            }
-        } catch (e: Exception) {
-            VegaLog.w(TAG, "Error cancelling FFmpeg session: ${e.message}")
-        }
-
-        try {
-            FFmpegKitConfig.closeFFmpegPipe(stream.pipePath)
-        } catch (e: Exception) {
-            VegaLog.w(TAG, "Error closing FFmpeg pipe: ${e.message}")
+        if (!stream.completion.isDone) {
+            // FFmpegSession.cancel() ignores CREATED sessions. Retry until its
+            // queued task enters RUNNING, then release the timer on completion.
+            val cancellation = cancellationExecutor.scheduleAtFixedRate({
+                try { stream.session.cancel() } catch (_: Exception) {}
+            }, 0, 50, TimeUnit.MILLISECONDS)
+            stream.completion.whenComplete { _, _ -> cancellation.cancel(false) }
         }
 
         activeStreams.remove(stream)
@@ -777,22 +806,6 @@ class FFmpegMp4Packager(
     private fun cancelAllActiveStreams() {
         for (stream in activeStreams) {
             cleanupStream(stream)
-        }
-    }
-
-    private fun unblockPipeAsync(pipePath: String) {
-        Thread {
-            try {
-                java.io.RandomAccessFile(File(pipePath), "rw").use { }
-            } catch (_: Exception) {
-                try {
-                    java.io.FileOutputStream(File(pipePath)).close()
-                } catch (_: Exception) {}
-            }
-        }.apply {
-            isDaemon = true
-            name = "fifo-unblock"
-            start()
         }
     }
 

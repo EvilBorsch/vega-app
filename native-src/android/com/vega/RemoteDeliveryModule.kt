@@ -671,6 +671,24 @@ class RemoteDeliveryModule(
         }.start()
     }
 
+    /** Warm the remux on the phone so slow torrent startup cannot time out the TV. */
+    @ReactMethod
+    fun awaitStreamReady(sessionId: String, promise: Promise) {
+        Thread {
+            try {
+                val session = sessions[sessionId] ?: throw java.io.IOException("Playback session canceled")
+                val packager = session.ffmpegPackager ?: throw java.io.IOException("Not a remux session")
+                packager.openReader(session.timelineOffsetUs / 1_000_000.0, 0)?.use { reader ->
+                    if (reader.read() < 0) throw java.io.IOException("Video source returned no playable media")
+                } ?: throw java.io.IOException("Playback session canceled")
+                if (sessions[sessionId] !== session) throw java.io.IOException("Playback session canceled")
+                promise.resolve(true)
+            } catch (e: Exception) {
+                promise.reject("STREAM_NOT_READY", e.message, e)
+            }
+        }.apply { name = "cast-stream-warmup"; isDaemon = true; start() }
+    }
+
     private var castScanCallback: MediaRouter.Callback? = null
 
     /**

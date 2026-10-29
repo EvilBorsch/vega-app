@@ -123,6 +123,7 @@ it('cancels cold torrent buffering without holding up stop or the next load', as
 });
 it('ignores a late delivery error belonging to the previous Cast playback', async () => {
   await manager.startRemotePlayback(device, {sourceUrl: 'http://source/A.mp4', title: 'A'});
+  useRemoteStore.getState().setConnectedDevice({...device, type: 'cast'});
   const error = deferred<string>();
   const readError = jest.spyOn(manager as any, 'getLastDeliveryError').mockReturnValueOnce(error.promise);
   manager.handleCastStatus({playerState: MediaPlayerState.IDLE, idleReason: MediaPlayerIdleReason.ERROR} as any);
@@ -131,6 +132,17 @@ it('ignores a late delivery error belonging to the previous Cast playback', asyn
   error.resolve('Old stream failed'); await tick();
   expect(useRemoteStore.getState().errorMessage).toBeUndefined();
   readError.mockRestore();
+});
+
+it('ignores stale Chromecast status while DLNA is playing', async () => {
+  await manager.startRemotePlayback(device, {sourceUrl: 'http://source/A.mp4', title: 'A'});
+  useRemoteStore.getState().setTimeline(120, 900);
+  manager.handleCastStatus({playerState: MediaPlayerState.BUFFERING, streamPosition: 0} as any);
+  expect(useRemoteStore.getState().status).toBe('playing');
+  expect(useRemoteStore.getState().currentTime).toBe(120);
+  manager.handleCastStatus({playerState: MediaPlayerState.IDLE, idleReason: MediaPlayerIdleReason.ERROR} as any);
+  expect(useRemoteStore.getState().errorMessage).toBeUndefined();
+  expect(useRemoteStore.getState().status).toBe('playing');
 });
 
 it.each(['cast', 'dlna'] as const)('seeks video-only remuxed media on %s without inventing an audio track', async type => {

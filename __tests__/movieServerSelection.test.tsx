@@ -115,6 +115,17 @@ it('Play still asks for a server after a previous choice', async () => {
   await mount();
   expect(streams.selectedStream.link).toBe('');
 });
+it('asks for another choice when a movie source fails instead of silently changing quality', async () => {
+  await mount();
+  act(() => streams.setSelectedStream(small));
+  act(() => { streams.switchToNextStream(); });
+  expect(streams.selectedStream.link).toBe('');
+  expect(streams.requiresServerSelection).toBe(true);
+  close();
+  params.playbackMode = 'resume';
+  await mount();
+  expect(streams.selectedStream.link).toBe(small.link);
+});
 it('resumes the same torrent when its live seeder count changes', async () => {
   mockGetStream.mockResolvedValue([{...small, tag: '1080p • 👤20 • 2.74 GB', tags: ['1080p', '👤20', '2.74 GB']}]);
   await mount();

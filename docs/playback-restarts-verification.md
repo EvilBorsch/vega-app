@@ -43,4 +43,35 @@ All 90 tests in nine targeted suites pass, as does TypeScript. The complete suit
 
 UPnP 601 means an argument is outside the renderer's allowed values; it is distinct from transition error 701. A regression test verifies that 601 is preserved without applying the 701 retry. No separate 601 root cause has yet been reproduced.
 
-Post-install UI setup, data restoration and full-app DLNA checks are pending an unlocked phone and a reachable LG. The physical results above belong to the earlier diagnostic-process checks, not the newly installed full APK.
+## Later fixes found on the installed APK (fixes.2 – fixes.7)
+
+- **History restore.** Android Downloads returns opaque `msd:`/`msf:` document URIs that Expo's legacy file reader cannot open, so imported history was ignored. `SyncStorageModule.readManifest` reads through the ContentResolver. The restored history appeared on Home on the phone.
+- **Source menu.** Quality and language filters (OR within a group, AND across groups; *Unspecified* keeps unlabeled sources), cards with a separate seeder badge, and a dialog sized to the screen. In landscape the filters sit in a left column; on the phone 1080p + RU reduced 50 sources to 3. The selected card's title now uses `onSecondaryContainer`, so it stays legible on the light poster palette.
+- **Failed movie torrents.** A failed torrent reopens the server choice instead of silently switching to a different quality. Resume keeps the user's last choice.
+- **FFmpeg stall on HTTP reuse.** `TorrentStreamServer` forced `Connection: keep-alive` even when the client asked to close. FFmpeg reused the closed socket, lost the MKV Cues and scanned from the start to the resume point. `scripts/check-torrent-http.py` failed on fixes.2 and passes on fixes.3; the MP4 header now appears 0.1–0.2 s after remux starts.
+- **LG Play timeout.** The LG starts playback but can answer SOAP `Play` after more than 8 s. `Play` alone gets a 30 s read timeout.
+- **Late Chromecast status during DLNA.** Cast SDK status is ignored while DLNA or Vega Cast is active.
+- **Native crash on retrying a torrent (SIGSEGV).** `AddTorrentAlert.handle()` wraps a non-owning pointer into alert storage that libtorrent recycles. TorrentModule cached it, and after a metadata timeout the next `addTorrent` of the same hash called `status()` on freed memory. An on-device libtorrent4j harness (`app_process`) reproduced it: alert handle 2 × SIGSEGV + 4 × stale `valid=false` in 6 runs, owned session handle 6/6 correct. Only `sm.find()` handles are cached now. A retry after a timeout no longer crashes. Because `download()` ignores a torrent already in the session, the retry also checks whether metadata arrived before its listener was registered.
+- **Stale URL after a server switch while casting.** The cast effect ran in the render after the switch with the previous torrent's `processedStreamUrl`, which is reset only after the old torrent is removed. The receiver was handed the old URL and got 404 ("Video processing failed"). `isRemoteSourceReady` requires the URL to be resolved for the selected stream; `remoteSourceReady.test.ts` failed before the change. On the phone a server switch during LG playback no longer issues a load; the TV keeps playing until the new source is ready.
+- **No peers on the fixed BitTorrent ports.** The session listened on 6881/6891. On this network every UDP tracker announce from the app timed out and the DHT stalled at 2 nodes, while the same libtorrent build on another port found peers. A diagnostics log (metadata-wait status every 5 s, listen/tracker/DHT alerts) showed it in the app. With a system-chosen port the same magnet got tracker replies with 117–149 peers and metadata in 1.0 s on two consecutive cold starts (eight consecutive failures before), and downloads reached 10.4 MB/s. After about ten minutes of streaming, UDP announces on the new port timed out too, while established peer connections kept downloading. The network appears to block UDP on a port after detecting BitTorrent. A new torrent in a long session may therefore need an app restart; this is a network limit, not something the app can fix.
+
+## Verification on 5.3.0-fixes.7 (installed, 2026-10-29)
+
+APK SHA-256: `fa28bd00196b6e8e5424122e5c4deb3b1fdb55b30cad12ba38babf9d6fadc0eb`, versionCode 217, signed with the same local key as earlier fork builds (installs over them without data loss).
+
+LG webOS UK6200PLA, The Whale, 1080p WEB-DL MP4 (2.15 GB, 167 seeders), all through the app UI with a separate SOAP observer (GetTransportInfo/GetPositionInfo only):
+
+| Cycle | Path | LG state | Start position |
+|---|---|---|---|
+| 1 | Resume → Cast → LG | PLAYING after 8 s, position advancing | 16:35 |
+| — | Pause / Play | PAUSED_PLAYBACK, then PLAYING from the same point | 17:07 → 17:08 |
+| 2 | Stop → Info → Resume → Cast → LG | PLAYING after ~4 s | 17:16 |
+| 3 | Stop → Resume (phone played locally ~3 min) → Cast → LG | PLAYING after 8 s | 19:52 |
+
+No 701, 601, SOAP timeout or false "Play failed" occurred. The LG answers `GetVolume` with 606 (not authorized); playback is unaffected.
+
+Not verified in this round: the Haier Chromecast (left untouched at the owner's request), the 4K HDR MKV remux path on LG with the full APK (verified on fixes.3 before the later fixes), and the 2.74 GB release, which Torrentio no longer lists for The Whale.
+
+Network notes from the same session: without a VPN the provider throttles Cloudflare, so the Torrentio list can take tens of seconds or time out. The tested VPN server dropped BitTorrent peer connections. The Torrentio provider module (`Zenda-Cross/vega-providers`) builds bare `magnet:?xt=urn:btih:` links and discards the `sources` trackers Torrentio returns, including Rutracker's `bt*.t-ru.org` trackers; that module is outside this repository.
+
+Checks: `npx tsc --noEmit` passes. The full Jest suite runs 153 suites: 144 pass and the same nine upstream suites listed above fail (1,060 tests pass, the same two fail). No new failures.

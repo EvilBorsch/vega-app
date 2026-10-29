@@ -46,7 +46,9 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         val sp = SettingsPack()
         sp.setEnableDht(true)
         sp.setEnableLsd(true)
-        sp.listenInterfaces("0.0.0.0:6881,0.0.0.0:6891")
+        // A system-chosen port: networks that throttle BitTorrent's well-known 6881-6891
+        // drop the UDP replies the DHT and trackers depend on, so magnets never find peers.
+        sp.listenInterfaces("0.0.0.0:0")
         sp.setDhtBootstrapNodes("router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.aelitis.com:6881")
         // Streaming waits on single pieces, so a slow peer must not hold a block for
         // libtorrent's default 20 s (piece) or 60 s (request) before it is re-requested.
@@ -60,6 +62,17 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         sp.setBoolean(settings_pack.bool_types.announce_to_all_trackers.swigValue(), true)
         sp.setBoolean(settings_pack.bool_types.announce_to_all_tiers.swigValue(), true)
         
+        // Network-level outcomes; without them a magnet that never gets peers says nothing.
+        sm.addListener(object : AlertListener {
+            override fun types(): IntArray? = null
+            override fun alert(alert: Alert<*>) {
+                when (alert) {
+                    is ListenSucceededAlert, is ListenFailedAlert, is UdpErrorAlert, is DhtErrorAlert,
+                    is DhtBootstrapAlert, is TrackerErrorAlert, is TrackerReplyAlert ->
+                        VegaLog.d(TAG, "Session ${alert.type()}: ${alert.message()}")
+                }
+            }
+        })
         sm.start(SessionParams(sp))
         sessionManager = sm
         VegaLog.d(TAG, "SessionManager started, running=${sm.isRunning}")
@@ -160,7 +173,9 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                                 VegaLog.d(TAG, "Alert: AddTorrentAlert for $alertHash")
 
                                 try {
-                                    torrentHandles[alertHash] = th
+                                    // alert.handle() points into alert storage that libtorrent recycles,
+                                    // so only the session's own copy may outlive this callback.
+                                    sm.find(Sha1Hash.parseHex(alertHash))?.let { torrentHandles[alertHash] = it }
                                     torrentSavePaths[alertHash] = downloadDir
                                     if (th.status().hasMetadata()) {
                                         metadataLatch.countDown()
@@ -208,9 +223,22 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                     val ti = TorrentInfo(File(magnetOrUrl))
                     sm.download(ti, File(downloadDir))
                 }
+                // download() ignores a torrent kept from an earlier timed-out attempt, so no
+                // add alert follows; its metadata may also have arrived before the listener.
+                if (expectedHash != null &&
+                    sm.find(Sha1Hash.parseHex(expectedHash))?.status()?.hasMetadata() == true) {
+                    metadataLatch.countDown()
+                }
 
                 VegaLog.d(TAG, "Waiting for metadata (45s timeout)...")
-                val gotMetadata = metadataLatch.await(45, TimeUnit.SECONDS)
+                var gotMetadata = false
+                for (waited in 5..45 step 5) {
+                    if (metadataLatch.await(5, TimeUnit.SECONDS)) {
+                        gotMetadata = true
+                        break
+                    }
+                    logMetadataWait(sm, expectedHash, waited)
+                }
                 VegaLog.d(TAG, "Metadata wait done: gotMetadata=$gotMetadata, addError=$addError")
                 sm.removeListener(listener)
 
@@ -595,6 +623,18 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("DELETE_ERROR", e.message, e)
+        }
+    }
+
+    // Shows why a magnet gets no metadata: no DHT, no peers found, or queued.
+    private fun logMetadataWait(sm: SessionManager, hash: String?, waitedSeconds: Int) {
+        try {
+            val st = hash?.let { sm.find(Sha1Hash.parseHex(it)) }?.status()
+            VegaLog.d(TAG, "Metadata wait ${waitedSeconds}s: state=${st?.state()} peers=${st?.numPeers()} " +
+                "connections=${st?.numConnections()} known=${st?.listPeers()} queue=${st?.queuePosition()} " +
+                "dhtNodes=${sm.dhtNodes()} torrents=${sm.swig().get_torrents().size} sessionPaused=${sm.isPaused}")
+        } catch (e: Exception) {
+            VegaLog.d(TAG, "Metadata wait ${waitedSeconds}s: status unavailable (${e.message})")
         }
     }
 

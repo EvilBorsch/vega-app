@@ -85,6 +85,7 @@ import {
 import {useStreamTrackSelections} from '../../lib/hooks/useStreamTrackSelections';
 import {useStreamResumePosition} from '../../lib/hooks/useStreamResumePosition';
 import {getNextEpisode, isWatched} from '../../lib/player/upNext';
+import {isRemoteSourceReady} from '../../lib/player/remoteSourceReady';
 import {
   usePlayerProgress,
   usePlayerSettings,
@@ -1549,6 +1550,10 @@ const Player = ({route}: Props): React.JSX.Element => {
   const [processedStreamUrl, setProcessedStreamUrl] = useState<string>(() =>
     isTorrentStream(selectedStream) ? '' : selectedStream.link,
   );
+  // Stream link that processedStreamUrl was resolved for.
+  const processedForLinkRef = useRef(
+    isTorrentStream(selectedStream) ? '' : selectedStream.link,
+  );
   // Resume point handed to the player with a torrent source, fixed per stream so
   // progress updates never reload it. Starting there skips buffering the opening
   // seconds, which on a torrent means downloading pieces that are then skipped.
@@ -1753,6 +1758,7 @@ const Player = ({route}: Props): React.JSX.Element => {
                 ? Math.floor(getStartPosition() * 1000)
                 : undefined,
             );
+            processedForLinkRef.current = selectedStream.link;
             setProcessedStreamUrl(streamUrl);
             setIsResolvingStream(false);
             await preparation;
@@ -1767,6 +1773,7 @@ const Player = ({route}: Props): React.JSX.Element => {
           }
         }
       } else {
+        processedForLinkRef.current = selectedStream.link;
         setProcessedStreamUrl(selectedStream.link);
         setIsResolvingStream(false);
       }
@@ -2398,15 +2405,14 @@ const Player = ({route}: Props): React.JSX.Element => {
     }
     // Wait until the server list has loaded and the chosen stream is resolved;
     // otherwise a stale or placeholder URL gets sent to the receiver.
-    if (streamLoading || isResolvingStream || !selectedStream?.link) {
-      return;
-    }
-
-    // Ensure processedStreamUrl is synchronized with selectedStream.link for non-torrent streams
     if (
-      !selectedStream.link.startsWith('magnet:') &&
-      selectedStream.type !== 'torrent' &&
-      processedStreamUrl !== selectedStream.link
+      !isRemoteSourceReady({
+        selectedStream,
+        processedStreamUrl,
+        processedForLink: processedForLinkRef.current,
+        streamLoading,
+        isResolvingStream,
+      })
     ) {
       return;
     }

@@ -89,6 +89,20 @@ class SyncStorageModule(private val context: ReactApplicationContext) : ReactCon
     }
 
     @ReactMethod
+    fun readManifest(uri: String, promise: Promise) {
+        writer.execute {
+            try {
+                val input = context.contentResolver.openInputStream(Uri.parse(uri))
+                    ?: throw java.io.IOException("Unable to open sync document")
+                val content = input.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                promise.resolve(content)
+            } catch (error: Exception) {
+                promise.reject("SYNC_READ_FAILED", "Unable to read sync manifest", error)
+            }
+        }
+    }
+
+    @ReactMethod
     fun writeManifest(uri: String, content: String, promise: Promise) {
         writer.execute {
             try {

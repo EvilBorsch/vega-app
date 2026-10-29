@@ -593,7 +593,9 @@ export const useStream = ({
   const activeEpisodeKey = getEpisodeIdentity(activeEpisode);
   const serverKey = rememberedServerKey(activeEpisode, routeParams, provider);
   const isMovie = routeParams?.type === 'movie';
+  const awaitingMovieChoice = useRef(false);
   const selectStream = useCallback((selection: React.SetStateAction<Stream>) => {
+    awaitingMovieChoice.current = false;
     setSelectedStream(current => {
       const next = typeof selection === 'function' ? selection(current) : selection;
       rememberServer(serverKey, next);
@@ -617,6 +619,7 @@ export const useStream = ({
       return;
     }
     previousEpisodeKeyRef.current = activeEpisodeKey;
+    awaitingMovieChoice.current = false;
     const path = getCompletedDownloadPathSync(activeEpisode, routeParams);
     setSelectedStream(
       externalVideoStream(routeParams) || (path
@@ -699,6 +702,7 @@ export const useStream = ({
         isLocalPath(current?.link) || current?.link === initialStreamLink
       );
       if (!current?.link) {
+          if (awaitingMovieChoice.current) return current;
         if (isMovie && isFetching) return current;
         const remembered = routeParams?.playbackMode === 'resume'
           ? findRememberedServer(serverKey, streamData) : undefined;
@@ -809,6 +813,12 @@ export const useStream = ({
         'Download stream could not be played, Trying online servers',
         ToastAndroid.SHORT,
       );
+      return true;
+    }
+    if (isMovie) {
+      awaitingMovieChoice.current = true;
+      setSelectedStream({server: '', link: '', type: ''});
+      ToastAndroid.show('This source could not be played. Choose another source or retry.', ToastAndroid.SHORT);
       return true;
     }
     const nextStream = getNextStream(streamData, selectedStream);

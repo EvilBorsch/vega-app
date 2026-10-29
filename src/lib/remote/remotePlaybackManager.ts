@@ -408,7 +408,8 @@ class RemotePlaybackManager {
 
   /** Single mapping from Cast receiver state to the remote store. */
   handleCastStatus(status: MediaStatus | null, sourceLabel?: string): void {
-    if(useRemoteStore.getState().connectedDevice?.type==='vega-cast')return;
+    const deviceType = useRemoteStore.getState().connectedDevice?.type;
+    if (deviceType && deviceType !== 'cast') return;
     if (!status || this.ending) return;
 
     const supportedCmds =

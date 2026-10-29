@@ -31,4 +31,16 @@ After the user restored the LG's network availability, the LG webOS UK6200PLA pa
 
 These are short restart checks, not full-film soak tests. They cover the 23.98 GB Rutracker source at 405.405 seconds; the separate 2.74 GB release was not independently exercised. Receiver checks used the updated native delivery and DLNA sequencing, but not the complete replacement application's UI.
 
-No complete replacement APK was installed over the user's app and no previous APK/build archive was created.
+## Installable fork build: 5.3.0-fixes.1
+
+The signed release APK was built successfully and installed as `com.vega` on the connected arm64 Android phone, replacing the official 5.2.2 installation with the user's authorization. Android reported versionName `5.3.0-fixes.1`, versionCode 214. The settings/library export and shared-folder sync history were verified before removal; no old APK/build archive was created.
+
+APK SHA-256: `60e41434fbc82193b0ac384ba69fc12b18e98a3d0783af71de2b494c7b3a2c80`.
+
+The APK includes automatic first-launch setup of the Zenda-Cross source and Torrentio. It fetches the current provider modules through the existing installer, needs internet on first setup, preserves legacy source migration, retries a failed setup on a later launch, and respects later removal. It does not embed a TV IP or the user's provider credentials. Torrent resume matching now tolerates live seeder-count changes by comparing the torrent hash.
+
+All 90 tests in nine targeted suites pass, as does TypeScript. The complete suite has 141 passing suites and the same nine failing baseline suites (1,043 passing tests, two failing tests). The APK's packaged source map was checked against the current App, ExtensionManager and remembered-server sources.
+
+UPnP 601 means an argument is outside the renderer's allowed values; it is distinct from transition error 701. A regression test verifies that 601 is preserved without applying the 701 retry. No separate 601 root cause has yet been reproduced.
+
+Post-install UI setup, data restoration and full-app DLNA checks are pending an unlocked phone and a reachable LG. The physical results above belong to the earlier diagnostic-process checks, not the newly installed full APK.

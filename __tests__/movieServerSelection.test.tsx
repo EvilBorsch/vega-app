@@ -115,6 +115,17 @@ it('Play still asks for a server after a previous choice', async () => {
   await mount();
   expect(streams.selectedStream.link).toBe('');
 });
+it('resumes the same torrent when its live seeder count changes', async () => {
+  mockGetStream.mockResolvedValue([{...small, tag: '1080p • 👤20 • 2.74 GB', tags: ['1080p', '👤20', '2.74 GB']}]);
+  await mount();
+  act(() => streams.setSelectedStream(streams.streamData[0]));
+  close();
+  params.playbackMode = 'resume';
+  const refreshed = {...small, tag: '1080p • 👤17 • 2.74 GB', tags: ['1080p', '👤17', '2.74 GB']};
+  mockGetStream.mockResolvedValue([high, refreshed]);
+  await mount();
+  expect(streams.selectedStream.link).toBe(small.link);
+});
 it('asks again if the remembered torrent disappears, even when another has the same server name', async () => {
   await mount();
   act(() => streams.setSelectedStream(small));

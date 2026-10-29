@@ -60,9 +60,9 @@ it('retries a transition rejection once after stopping the renderer', async () =
   expect(native.setAVTransportURI).toHaveBeenCalledTimes(2);
   expect(native.play).toHaveBeenCalledTimes(1);
 });
-it('does not retry unsupported media failures', async () => {
-  native.setAVTransportURI.mockRejectedValueOnce(new Error('UPnP error 714: Illegal MIME-type'));
-  await expect(dlna.loadMedia(device, 'http://phone/B')).rejects.toThrow('714');
+it.each([601, 714])('does not treat argument/media failure %s as transition fault 701', async code => {
+  native.setAVTransportURI.mockRejectedValueOnce(new Error(`UPnP error ${code}: Invalid media argument`));
+  await expect(dlna.loadMedia(device, 'http://phone/B')).rejects.toThrow(String(code));
   expect(native.setAVTransportURI).toHaveBeenCalledTimes(1);
   expect(native.play).not.toHaveBeenCalled();
 });

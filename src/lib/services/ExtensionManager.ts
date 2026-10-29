@@ -66,6 +66,41 @@ const isNewerInstalledVersion = (installed: string, requested: string): boolean 
 export class ExtensionManager {
   private static instance: ExtensionManager;
   private readonly legacyCustomProviderBaseUrlKey = 'customProviderBaseUrl';
+  private defaultProvidersTask?: Promise<void>;
+
+  /** Install the fork's defaults once; later removals remain the user's choice. */
+  ensureDefaultProviders(): Promise<void> {
+    const key = 'forkDefaultProviders:v1';
+    if (mainStorage.getBool(key)) return Promise.resolve();
+    if (this.defaultProvidersTask) return this.defaultProvidersTask;
+    this.defaultProvidersTask = (async () => {
+      this.migrateLegacyCustomProviderSource();
+      let source = extensionStorage.getProviderSources()
+        .find(item => item.author === 'Zenda-Cross');
+      if (!source) {
+        source = createProviderSource('Zenda-Cross');
+        extensionStorage.addProviderSources(source.author, source.url);
+      }
+      const installed = extensionStorage.getInstalledProviders().some(provider =>
+        provider.value === 'torrentio' && provider.source?.author === source.author,
+      );
+      if (!installed) {
+        const manifest = await this.fetchManifest(source);
+        const sourceIsPresent = () => extensionStorage.getProviderSources().some(item =>
+          item.author === source.author && item.url === source.url,
+        );
+        if (!sourceIsPresent()) {
+          mainStorage.setBool(key, true);
+          return;
+        }
+        const provider = manifest.find(item => item.value === 'torrentio' && !item.disabled);
+        if (!provider) throw new Error('Torrentio is unavailable in the default provider source');
+        await this.installProvider(provider, sourceIsPresent);
+      }
+      mainStorage.setBool(key, true);
+    })().finally(() => { this.defaultProvidersTask = undefined; });
+    return this.defaultProvidersTask;
+  }
 
   private testMode = false;
   private baseUrlTestMode = '';
@@ -429,17 +464,20 @@ export class ExtensionManager {
   /**
    * Install a provider
    */
-  async installProvider(provider: ProviderExtension): Promise<void> {
+  async installProvider(provider: ProviderExtension, shouldInstall?: () => boolean): Promise<void> {
     try {
       // Download the provider modules
-      await this.downloadProviderModules(
+      const downloaded = await this.downloadProviderModules(
         provider.source.url,
         provider.source.author,
         provider.value,
         provider.version,
         provider.path,
+        false,
       );
 
+      if (shouldInstall && !shouldInstall()) return;
+      extensionStorage.cacheProviderModules(downloaded);
       // Mark as installed
       extensionStorage.installProvider(provider);
 

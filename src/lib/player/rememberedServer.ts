@@ -36,9 +36,16 @@ export function findRememberedServer(
 ): Stream | undefined {
   try {
     const saved = mainStorage.getString(key);
-    return saved
-      ? streams.find(stream => JSON.stringify(identity(stream)) === saved)
-      : undefined;
+    if (!saved) return undefined;
+    const previous = JSON.parse(saved);
+    return streams.find(stream => {
+      const current = identity(stream);
+      // Torrentio includes live seeder counts in its display tags. The hash
+      // identifies the actual release even when those labels change.
+      return previous.torrentHash
+        ? current.type === previous.type && current.torrentHash === previous.torrentHash
+        : JSON.stringify(current) === saved;
+    });
   } catch {
     return undefined;
   }

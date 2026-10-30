@@ -86,6 +86,7 @@ import {useStreamTrackSelections} from '../../lib/hooks/useStreamTrackSelections
 import {useStreamResumePosition} from '../../lib/hooks/useStreamResumePosition';
 import {getNextEpisode, isWatched} from '../../lib/player/upNext';
 import {isRemoteSourceReady} from '../../lib/player/remoteSourceReady';
+import {episodeTargetFromLink, pickVideoFileIndex} from '../../lib/player/episodeFile';
 import {
   usePlayerProgress,
   usePlayerSettings,
@@ -1609,28 +1610,7 @@ const Player = ({route}: Props): React.JSX.Element => {
     if (!files || files.length === 0) {
       throw new Error('No files found in torrent');
     }
-
-    const videoExts = [
-      '.mp4',
-      '.mkv',
-      '.avi',
-      '.webm',
-      '.mov',
-      '.ts',
-      '.flv',
-      '.wmv',
-      '.m4v',
-    ];
-    let bestIndex = 0;
-    let bestSize = 0;
-    for (const f of files) {
-      const name = f.name.toLowerCase();
-      if (videoExts.some(ext => name.endsWith(ext)) && f.size > bestSize) {
-        bestIndex = f.index;
-        bestSize = f.size;
-      }
-    }
-    return bestIndex;
+    return pickVideoFileIndex(files, episodeTargetFromLink(activeEpisode?.link));
   };
 
   const activeTorrentRef = useRef<string | null>(null);

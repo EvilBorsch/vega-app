@@ -433,6 +433,13 @@ class RemoteDeliveryService {
     await VegaRemoteDelivery.startCastDiscovery();
   }
 
+  /** Cast devices from the active scan above, as react-native-google-cast devices. */
+  onCastDevices<T>(listener: (devices: T[]) => void): () => void {
+    if (Platform.OS !== 'android') return () => {};
+    const subscription = DeviceEventEmitter.addListener('onVegaCastDevices', listener);
+    return () => subscription.remove();
+  }
+
   async stopCastDiscovery(): Promise<void> {
     if (!VegaRemoteDelivery?.stopCastDiscovery) return;
     await VegaRemoteDelivery.stopCastDiscovery();

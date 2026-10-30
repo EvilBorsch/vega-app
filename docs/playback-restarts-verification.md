@@ -75,3 +75,14 @@ Not verified in this round: the Haier Chromecast (left untouched at the owner's 
 Network notes from the same session: without a VPN the provider throttles Cloudflare, so the Torrentio list can take tens of seconds or time out. The tested VPN server dropped BitTorrent peer connections. The Torrentio provider module (`Zenda-Cross/vega-providers`) builds bare `magnet:?xt=urn:btih:` links and discards the `sources` trackers Torrentio returns, including Rutracker's `bt*.t-ru.org` trackers; that module is outside this repository.
 
 Checks: `npx tsc --noEmit` passes. The full Jest suite runs 153 suites: 144 pass and the same nine upstream suites listed above fail (1,060 tests pass, the same two fail). No new failures.
+
+## 5.3.0-fixes.8: series episodes and Google Cast discovery
+
+- **Wrong episode from season packs.** For an episode, Torrentio often returns a whole-season torrent and names the episode's file (`fileIdx`, `behaviorHints.filename`). The provider module drops both, and Vega streamed the largest video file, which in a season pack is often the last episode. Vega now reads the season and episode from the Torrentio episode link and picks the matching file (`S01E01`, `S01.E01`, `1x01`, `Episode 1`, `Серия 1`), ignoring samples and extras, falling back to episode order when names carry no numbers. Movies still use the largest video. Against Torrentio's own episode-to-file mapping for all eight episodes of *The Boy's Word* (46 season packs, 283 episodes) the new choice matched 283/283; the largest file matched 46. On the phone, episode 1 streamed `…S01.E01…` from both a 2160p and a 1080p pack. Downloads of series still keep the largest file; that native path is unchanged.
+- **Google Cast devices missing until a lucky restart.** react-native-google-cast attaches its device-list callback in `onHostResume` only if Cast is already initialised, but marks it attached either way, so its list can stay empty for the whole run while Play services publishes the TV. It also hides a TV that already runs another app's session. Vega's own active-scan callback, started whenever "Play on" opens, now reports the devices (`onVegaCastDevices`) and logs each route with the reason it was skipped; the picker merges both lists. On the phone (VPN on) the Haier was listed in every fresh app session where the picker was opened (three) and on three consecutive reopenings.
+
+APK SHA-256: `f82c7814a121f7f43c4c117826258ae2d4ff6eeb18d39d012455e142f03917f5`, versionCode 218.
+
+Checks: `npx tsc --noEmit` passes. Full Jest: 146 of 155 suites pass, the same nine upstream suites fail; 1,070 tests pass (ten new). Nine suites whose Jest workers were killed by the OS during the parallel run passed when rerun in band.
+
+Observed while testing: before a stream is ready the player's top bar has no Cast button and the lock button sits where Cast later appears, so an early tap there locks the player.

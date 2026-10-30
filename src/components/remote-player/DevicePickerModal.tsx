@@ -6,6 +6,7 @@ import GoogleCast, {useCastDevice, useDevices} from 'react-native-google-cast';
 import {useRemoteStore} from '../../lib/remote/remoteStore';
 import {dlnaService} from '../../lib/remote/dlnaService';
 import {remoteDeliveryService} from '../../lib/remote/remoteDeliveryService';
+import {mergeCastDevices} from '../../lib/remote/castDevices';
 import {remotePlaybackManager} from '../../lib/remote/remotePlaybackManager';
 import {RemoteDevice} from '../../lib/remote/types';
 import {VegaCastScanner} from './VegaCastScanner';
@@ -38,6 +39,8 @@ export const DevicePickerModal: React.FC<DevicePickerModalProps> = ({
   const colors = useM3Colors();
   const castDevice = useCastDevice();
   const castDevices = useDevices();
+  const [scannedCastDevices, setScannedCastDevices] = useState<typeof castDevices>([]);
+  useEffect(() => remoteDeliveryService.onCastDevices(setScannedCastDevices), []);
   const connectedDevice = useRemoteStore(state => state.connectedDevice);
   const availableDlnaDevices = useRemoteStore(
     state => state.availableDlnaDevices,
@@ -134,10 +137,7 @@ export const DevicePickerModal: React.FC<DevicePickerModalProps> = ({
   };
 
   // The connected device is excluded by the library's list; show it first.
-  const castList = [
-    ...(castDevice ? [castDevice] : []),
-    ...castDevices.filter(device => device.deviceId !== castDevice?.deviceId),
-  ];
+  const castList = mergeCastDevices(castDevice, castDevices, scannedCastDevices);
 
   return (
     <>

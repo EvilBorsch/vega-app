@@ -31,6 +31,13 @@ it('does not reinstall a provider removed during download', async () => {
   expect(await manager.updateProvider(provider('2.0'))).toBe(false);
   expect(extensionStorage.installProvider).not.toHaveBeenCalled();
 });
+it('does not commit an initial installation canceled during download', async () => {
+  const manager = new ExtensionManager(); let sourcePresent = true;
+  jest.spyOn(manager, 'downloadProviderModules').mockImplementation(async () => {sourcePresent = false; return bundle('2.0');});
+  await (manager.installProvider as any)(provider('2.0'), () => sourcePresent);
+  expect(extensionStorage.cacheProviderModules).not.toHaveBeenCalled();
+  expect(extensionStorage.installProvider).not.toHaveBeenCalled();
+});
 it('commits modules and the install record only after a successful download', async () => {
   const manager = new ExtensionManager();
   jest.spyOn(manager, 'downloadProviderModules').mockResolvedValue(bundle('2.0'));

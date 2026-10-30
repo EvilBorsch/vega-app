@@ -144,11 +144,18 @@ class RemotePlaybackManager {
     const owned = this.operationSessions.get(token) || new Set<string>();
     owned.add(options.sessionId);
     this.operationSessions.set(token, owned);
-    return remoteDeliveryService.prepareStream({
+    const prepared = await remoteDeliveryService.prepareStream({
       ...options,
       audioDelayMs:
         options.audioDelayMs ?? useRemoteStore.getState().audioDelayMs,
     });
+    this.assertPlaybackOperation(token);
+    if (options.mode === 'ffmpeg') {
+      await this.awaitCancelableOperation(
+        remoteDeliveryService.waitForStreamReady(options.sessionId), token,
+      );
+    }
+    return prepared;
   }
 
   private async cleanupCanceledOperation(token: number): Promise<void> {
@@ -401,7 +408,8 @@ class RemotePlaybackManager {
 
   /** Single mapping from Cast receiver state to the remote store. */
   handleCastStatus(status: MediaStatus | null, sourceLabel?: string): void {
-    if(useRemoteStore.getState().connectedDevice?.type==='vega-cast')return;
+    const deviceType = useRemoteStore.getState().connectedDevice?.type;
+    if (deviceType && deviceType !== 'cast') return;
     if (!status || this.ending) return;
 
     const supportedCmds =
@@ -476,8 +484,9 @@ class RemotePlaybackManager {
       });
       store.setStatus('error');
       store.cancelSeek();
+      const generation = this.playbackGeneration;
       this.getLastDeliveryError().then(deliveryError => {
-        if (this.ending) return;
+        if (this.ending || generation !== this.playbackGeneration) return;
         useRemoteStore
           .getState()
           .setErrorMessage(

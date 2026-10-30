@@ -48,6 +48,14 @@ class DlnaModule(
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
+    // LG can acknowledge Play only after opening and buffering the media. An
+    // eight-second read timeout reports failure even while the TV starts playing.
+    // Keep discovery, polling and ordinary controls on the shorter client.
+    private val playHttpClient = httpClient.newBuilder()
+        .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(35, TimeUnit.SECONDS)
+        .build()
+
     private var multicastLock: WifiManager.MulticastLock? = null
     @Volatile private var isSearching = false
     @Volatile private var lastSoapError: String? = null
@@ -396,7 +404,7 @@ class DlnaModule(
             """.trimIndent()
             val res = sendSoapAction(controlUrl, "urn:schemas-upnp-org:service:AVTransport:1#Play", soapBody)
             reactContext.runOnUiQueueThread {
-                if (res != null) promise.resolve(true) else promise.reject("SOAP_ERROR", "Play failed")
+                if (res != null) promise.resolve(true) else promise.reject("SOAP_ERROR", "Play failed: ${lastSoapError ?: "Unknown error"}")
             }
         }.start()
     }
@@ -586,7 +594,8 @@ class DlnaModule(
                 .addHeader("SOAPAction", "\"$soapAction\"")
                 .post(body)
                 .build()
-            httpClient.newCall(request).execute().use { response ->
+            val client = if (soapAction.endsWith("#Play")) playHttpClient else httpClient
+            client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     response.body?.string() ?: ""
                 } else {

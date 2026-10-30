@@ -5,7 +5,7 @@ import {remoteDeliveryService as delivery} from '../src/lib/remote/remoteDeliver
 import {dlnaService as dlna} from '../src/lib/remote/dlnaService';
 import {useRemoteStore} from '../src/lib/remote/remoteStore';
 import {RemotePlaybackCanceledError, isRemotePlaybackCanceled} from '../src/lib/remote/remotePlaybackErrors';
-import GoogleCast from 'react-native-google-cast';
+import GoogleCast, {MediaPlayerState, MediaPlayerIdleReason} from 'react-native-google-cast';
 jest.mock('../src/lib/storage/StorageService', () => ({
   mainStorage: {getBool: (_key: string, fallback?: boolean) => fallback ?? false, setBool: () => {}},
 }));
@@ -18,6 +18,8 @@ jest.mock('expo-crypto', () => ({
 }));
 jest.mock('react-native-google-cast', () => ({
   __esModule: true,
+  MediaPlayerState: {IDLE: 'idle', PLAYING: 'playing', PAUSED: 'paused', BUFFERING: 'buffering', LOADING: 'loading'},
+  MediaPlayerIdleReason: {ERROR: 'error', FINISHED: 'finished', INTERRUPTED: 'interrupted'},
   default: {
     getSessionManager: (() => {
       const sessionManager = {getCurrentCastSession: jest.fn(async () => null), endCurrentSession: jest.fn(async () => {})};
@@ -30,6 +32,7 @@ jest.mock('../src/lib/remote/remoteDeliveryService', () => ({
     onMediaAction: jest.fn(),
     inspectTracks: jest.fn(),
     prepareStream: jest.fn(),
+    waitForStreamReady: jest.fn(async () => {}),
     prepareSubtitle: jest.fn(async () => {}),
     cleanupSession: jest.fn(async () => {}),
     retireSessionWhenReady: jest.fn(async () => {}),
@@ -78,6 +81,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   global.fetch = jest.fn().mockResolvedValue({ok: true, status: 200});
   (delivery.prepareSubtitle as jest.Mock).mockReset().mockResolvedValue(undefined);
+  (delivery.waitForStreamReady as jest.Mock).mockReset().mockResolvedValue(undefined);
   (GoogleCast.getSessionManager().getCurrentCastSession as jest.Mock).mockResolvedValue(null);
   useRemoteStore.getState().resetSession();
   (delivery.inspectTracks as jest.Mock).mockResolvedValue(inspected);
@@ -91,6 +95,54 @@ beforeEach(() => {
 afterEach(async () => {
   await manager.stop();
   global.fetch = originalFetch;
+});
+
+it('buffers a remux on the phone before asking the receiver to open it', async () => {
+  (delivery.inspectTracks as jest.Mock).mockResolvedValue({...inspected, container: 'matroska'});
+  const ready = deferred<void>();
+  (delivery.waitForStreamReady as jest.Mock).mockImplementationOnce(() => ready.promise);
+  const loading = manager.startRemotePlayback(device, {sourceUrl: 'http://127.0.0.1:123/stream/movie.mkv', title: 'Movie'});
+  await tick();
+  expect(delivery.waitForStreamReady).toHaveBeenCalledTimes(1);
+  expect(dlna.loadMedia).not.toHaveBeenCalled();
+  ready.resolve(); await loading;
+  expect(dlna.loadMedia).toHaveBeenCalledTimes(1);
+});
+it('cancels cold torrent buffering without holding up stop or the next load', async () => {
+  (delivery.inspectTracks as jest.Mock).mockResolvedValue({...inspected, container: 'matroska'});
+  const ready = deferred<void>();
+  (delivery.waitForStreamReady as jest.Mock).mockImplementationOnce(() => ready.promise);
+  const loading = manager.startRemotePlayback(device, {sourceUrl: 'http://127.0.0.1:123/stream/movie.mkv', title: 'Movie'});
+  const canceled = expect(loading).rejects.toThrow('canceled');
+  await tick();
+  const id = (delivery.prepareStream as jest.Mock).mock.calls[0][0].sessionId;
+  await manager.stop(); await canceled;
+  expect(delivery.cleanupSession).toHaveBeenCalledWith(id);
+  expect(dlna.loadMedia).not.toHaveBeenCalled();
+  ready.resolve();
+});
+it('ignores a late delivery error belonging to the previous Cast playback', async () => {
+  await manager.startRemotePlayback(device, {sourceUrl: 'http://source/A.mp4', title: 'A'});
+  useRemoteStore.getState().setConnectedDevice({...device, type: 'cast'});
+  const error = deferred<string>();
+  const readError = jest.spyOn(manager as any, 'getLastDeliveryError').mockReturnValueOnce(error.promise);
+  manager.handleCastStatus({playerState: MediaPlayerState.IDLE, idleReason: MediaPlayerIdleReason.ERROR} as any);
+  await manager.stop();
+  await manager.startRemotePlayback(device, {sourceUrl: 'http://source/B.mp4', title: 'B'});
+  error.resolve('Old stream failed'); await tick();
+  expect(useRemoteStore.getState().errorMessage).toBeUndefined();
+  readError.mockRestore();
+});
+
+it('ignores stale Chromecast status while DLNA is playing', async () => {
+  await manager.startRemotePlayback(device, {sourceUrl: 'http://source/A.mp4', title: 'A'});
+  useRemoteStore.getState().setTimeline(120, 900);
+  manager.handleCastStatus({playerState: MediaPlayerState.BUFFERING, streamPosition: 0} as any);
+  expect(useRemoteStore.getState().status).toBe('playing');
+  expect(useRemoteStore.getState().currentTime).toBe(120);
+  manager.handleCastStatus({playerState: MediaPlayerState.IDLE, idleReason: MediaPlayerIdleReason.ERROR} as any);
+  expect(useRemoteStore.getState().errorMessage).toBeUndefined();
+  expect(useRemoteStore.getState().status).toBe('playing');
 });
 
 it.each(['cast', 'dlna'] as const)('seeks video-only remuxed media on %s without inventing an audio track', async type => {

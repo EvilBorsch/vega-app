@@ -53,6 +53,9 @@ import Constants from 'expo-constants';
 import {settingsStorage} from './lib/storage';
 import {syncParallelStreaming} from './lib/parallelStreaming';
 import {updateProvidersService} from './lib/services/UpdateProviders';
+import {extensionManager} from './lib/services/ExtensionManager';
+import {extensionStorage} from './lib/storage/extensionStorage';
+import useContentStore from './lib/zustand/contentStore';
 import {QueryClientProvider} from '@tanstack/react-query';
 import {queryClient} from './lib/client';
 import GlobalErrorBoundary from './components/GlobalErrorBoundary';
@@ -136,6 +139,7 @@ export type RootStackParamList = {
     alwaysCast?: boolean;
     // Plays first, before online servers load (an unfinished download).
     initialStream?: Stream;
+    playbackMode?: 'play' | 'resume';
   };
 };
 
@@ -668,6 +672,13 @@ const App = () => {
 
   // Initialize update service
   useEffect(() => {
+    // First-run setup also works when automatic provider updates are disabled.
+    extensionManager.ensureDefaultProviders().then(() => {
+      const providers = extensionStorage.getInstalledProviders();
+      const store = useContentStore.getState();
+      store.setInstalledProviders(providers);
+      if (!store.provider.value && providers.length) store.setProvider(providers[0]);
+    }).catch(error => console.warn('Default provider setup will retry on next launch:', error));
     // Start automatic update checking at app startup
     updateProvidersService.startAutomaticUpdateCheck();
 

@@ -231,7 +231,9 @@ class TorrentStreamServer : NanoHTTPD("127.0.0.1", 0) {
         }
         response.addHeader("Accept-Ranges", "bytes")
         response.addHeader("Content-Length", contentLength.toString())
-        response.addHeader("Connection", "keep-alive")
+        // NanoHTTPD chooses this header from the request's Connection policy.
+        // Advertising keep-alive after a client requested close makes FFmpeg reuse
+        // a dead socket while probing the MKV tail, invalidating its seek index.
 
         VegaLog.d(TAG, "Response ready: 206, Content-Length=$contentLength, Content-Range=bytes $start-$end/$fileSize")
         return response

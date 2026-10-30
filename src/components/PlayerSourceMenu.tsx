@@ -1,4 +1,6 @@
-import React, {memo, useCallback, useMemo} from 'react';
+import React, {memo, useCallback, useMemo, useState} from 'react';
+import {filterStreams} from '../lib/player/streamFilters';
+import StreamFilterControls from './StreamFilterControls';
 import {FlatList, ScrollView, Text, View} from 'react-native';
 import type {Stream} from '../lib/providers/types';
 import {isTV} from '../lib/tv/constants';
@@ -176,9 +178,12 @@ const PlayerSourceMenu = memo(
     onSelectLocal,
     onTVFocus,
   }: Props) => {
+    const [qualityFilters, setQualityFilters] = useState<string[]>([]);
+    const [languageFilters, setLanguageFilters] = useState<string[]>([]);
+    const filteredStreams = useMemo(() => filterStreams(streams, qualityFilters, languageFilters), [streams, qualityFilters, languageFilters]);
     const servers = useMemo(
       () =>
-        streams.map((stream, index): Item => {
+        filteredStreams.map((stream, index): Item => {
           const rawTags = Array.isArray(stream.tags)
             ? stream.tags
             : typeof stream.tag === 'string'
@@ -200,7 +205,7 @@ const PlayerSourceMenu = memo(
             stream,
           };
         }),
-      [streams],
+      [filteredStreams],
     );
     const qualities = useMemo(() => {
       const items: Item[] = videoTracks.map((track, index) => {
@@ -273,18 +278,21 @@ const PlayerSourceMenu = memo(
 
     return (
       <View className="flex-row w-full h-full p-1 px-4">
+        <View style={{flex: 1}}>
+        {streams.length > 1 && <StreamFilterControls streams={streams} qualities={qualityFilters} languages={languageFilters} onQualities={setQualityFilters} onLanguages={setLanguageFilters} />}
         <MenuColumn
           items={servers}
           selectedKey={selectedServerKey}
           preferredKey={preferredServerKey}
           title="Server"
-          message={loading ? 'Loading online servers...' : undefined}
+          message={loading ? 'Loading online servers...' : servers.length ? undefined : 'No matching sources. Change filters.'}
           footer={local}
           accentColor={accentColor}
           preferredRef={preferredRef}
           onSelect={selectServer}
           onTVFocus={onTVFocus}
         />
+        </View>
         <View
           style={{
             width: 1,

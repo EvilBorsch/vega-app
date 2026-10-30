@@ -10,7 +10,9 @@ import android.net.wifi.WifiManager
 import android.util.Log
 import androidx.mediarouter.media.MediaRouter
 import com.facebook.react.bridge.Arguments
+import com.google.android.gms.cast.CastDevice
 import com.google.android.gms.cast.framework.CastContext
+import com.reactnative.googlecast.types.RNGCDevice
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -671,12 +673,32 @@ class RemoteDeliveryModule(
         }.start()
     }
 
+    /** Warm the remux on the phone so slow torrent startup cannot time out the TV. */
+    @ReactMethod
+    fun awaitStreamReady(sessionId: String, promise: Promise) {
+        Thread {
+            try {
+                val session = sessions[sessionId] ?: throw java.io.IOException("Playback session canceled")
+                val packager = session.ffmpegPackager ?: throw java.io.IOException("Not a remux session")
+                packager.openReader(session.timelineOffsetUs / 1_000_000.0, 0)?.use { reader ->
+                    if (reader.read() < 0) throw java.io.IOException("Video source returned no playable media")
+                } ?: throw java.io.IOException("Playback session canceled")
+                if (sessions[sessionId] !== session) throw java.io.IOException("Playback session canceled")
+                promise.resolve(true)
+            } catch (e: Exception) {
+                promise.reject("STREAM_NOT_READY", e.message, e)
+            }
+        }.apply { name = "cast-stream-warmup"; isDaemon = true; start() }
+    }
+
     private var castScanCallback: MediaRouter.Callback? = null
 
     /**
      * react-native-google-cast registers its route callback without active scan on
      * Android, so a custom device list stays empty unless the Cast button is on screen.
-     * An active-scan callback here makes the library's own callback receive the routes.
+     * Its list also stays empty for the whole process when Cast was not ready at its
+     * first resume: it marks the callback attached without attaching it. This active-scan
+     * callback therefore reports the devices itself ("onVegaCastDevices").
      */
     @ReactMethod
     fun startCastDiscovery(promise: Promise) {
@@ -686,18 +708,54 @@ class RemoteDeliveryModule(
                     @Suppress("DEPRECATION")
                     val selector = CastContext.getSharedInstance(reactContext.applicationContext).mergedSelector
                         ?: throw IllegalStateException("Google Cast is not initialised")
-                    val callback = object : MediaRouter.Callback() {}
-                    MediaRouter.getInstance(reactContext).addCallback(
+                    val callback = object : MediaRouter.Callback() {
+                        override fun onRouteAdded(router: MediaRouter, route: MediaRouter.RouteInfo) = emitCastDevices(router)
+                        override fun onRouteRemoved(router: MediaRouter, route: MediaRouter.RouteInfo) = emitCastDevices(router)
+                        override fun onRouteChanged(router: MediaRouter, route: MediaRouter.RouteInfo) = emitCastDevices(router)
+                    }
+                    val router = MediaRouter.getInstance(reactContext)
+                    router.addCallback(
                         selector,
                         callback,
                         MediaRouter.CALLBACK_FLAG_PERFORM_ACTIVE_SCAN or MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY
                     )
                     castScanCallback = callback
+                    emitCastDevices(router)
                 }
                 promise.resolve(true)
             } catch (e: Exception) {
                 promise.reject("CAST_DISCOVERY_ERROR", e.message, e)
             }
+        }
+    }
+
+    // react-native-google-cast's device filters, one entry per device. A TV already
+    // casting from another app stays listed: starting a session there takes it over.
+    private fun emitCastDevices(router: MediaRouter) {
+        try {
+            val devices = Arguments.createArray()
+            val seen = HashSet<String>()
+            for (route in router.routes) {
+                val device = CastDevice.getFromBundle(route.extras) ?: continue
+                val skip = when {
+                    route.isDefault -> "default"
+                    route.description == "Google Cast Multizone Member" -> "multizone member"
+                    route.playbackType != MediaRouter.RouteInfo.PLAYBACK_TYPE_REMOTE -> "not remote"
+                    !seen.add(device.deviceId) -> "duplicate"
+                    else -> null
+                }
+                VegaLog.d(TAG, "Cast route ${device.friendlyName} (${device.deviceId}) " +
+                    "session=${route.extras?.getString("com.google.android.gms.cast.EXTRA_SESSION_ID") != null} " +
+                    "enabled=${route.isEnabled} ${skip ?: "listed"}")
+                if (skip == null) RNGCDevice.toJson(device)?.let { devices.pushMap(it) }
+            }
+            if (reactContext.hasActiveReactInstance()) {
+                reactContext
+                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                    .emit("onVegaCastDevices", devices)
+            }
+        } catch (e: Exception) {
+            VegaLog.w(TAG, "Failed to report Cast devices: ${e.message}")
         }
     }
 

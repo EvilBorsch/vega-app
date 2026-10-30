@@ -1,5 +1,6 @@
 import {findSavedSubtitle, savedSubtitleLabel} from '../../lib/subtitles/savedSubtitles';
 import RemovableSubtitleRow from '../../components/RemovableSubtitleRow';
+import MovieServerDialog from '../../components/MovieServerDialog';
 import {getPlaybackQuality} from '../../lib/player/playbackQuality';
 import {localContentId} from '../../lib/localContent/library';
 import useLocalContentStore from '../../lib/zustand/localContentStore';
@@ -84,6 +85,8 @@ import {
 import {useStreamTrackSelections} from '../../lib/hooks/useStreamTrackSelections';
 import {useStreamResumePosition} from '../../lib/hooks/useStreamResumePosition';
 import {getNextEpisode, isWatched} from '../../lib/player/upNext';
+import {isRemoteSourceReady} from '../../lib/player/remoteSourceReady';
+import {episodeTargetFromLink, pickVideoFileIndex} from '../../lib/player/episodeFile';
 import {
   usePlayerProgress,
   usePlayerSettings,
@@ -868,6 +871,7 @@ const Player = ({route}: Props): React.JSX.Element => {
     streamData,
     selectedStream,
     setSelectedStream,
+    requiresServerSelection,
     externalSubs,
     savedSubtitles,
     saveSubtitle,
@@ -1547,6 +1551,10 @@ const Player = ({route}: Props): React.JSX.Element => {
   const [processedStreamUrl, setProcessedStreamUrl] = useState<string>(() =>
     isTorrentStream(selectedStream) ? '' : selectedStream.link,
   );
+  // Stream link that processedStreamUrl was resolved for.
+  const processedForLinkRef = useRef(
+    isTorrentStream(selectedStream) ? '' : selectedStream.link,
+  );
   // Resume point handed to the player with a torrent source, fixed per stream so
   // progress updates never reload it. Starting there skips buffering the opening
   // seconds, which on a torrent means downloading pieces that are then skipped.
@@ -1602,28 +1610,7 @@ const Player = ({route}: Props): React.JSX.Element => {
     if (!files || files.length === 0) {
       throw new Error('No files found in torrent');
     }
-
-    const videoExts = [
-      '.mp4',
-      '.mkv',
-      '.avi',
-      '.webm',
-      '.mov',
-      '.ts',
-      '.flv',
-      '.wmv',
-      '.m4v',
-    ];
-    let bestIndex = 0;
-    let bestSize = 0;
-    for (const f of files) {
-      const name = f.name.toLowerCase();
-      if (videoExts.some(ext => name.endsWith(ext)) && f.size > bestSize) {
-        bestIndex = f.index;
-        bestSize = f.size;
-      }
-    }
-    return bestIndex;
+    return pickVideoFileIndex(files, episodeTargetFromLink(activeEpisode?.link));
   };
 
   const activeTorrentRef = useRef<string | null>(null);
@@ -1751,6 +1738,7 @@ const Player = ({route}: Props): React.JSX.Element => {
                 ? Math.floor(getStartPosition() * 1000)
                 : undefined,
             );
+            processedForLinkRef.current = selectedStream.link;
             setProcessedStreamUrl(streamUrl);
             setIsResolvingStream(false);
             await preparation;
@@ -1765,6 +1753,7 @@ const Player = ({route}: Props): React.JSX.Element => {
           }
         }
       } else {
+        processedForLinkRef.current = selectedStream.link;
         setProcessedStreamUrl(selectedStream.link);
         setIsResolvingStream(false);
       }
@@ -2396,15 +2385,14 @@ const Player = ({route}: Props): React.JSX.Element => {
     }
     // Wait until the server list has loaded and the chosen stream is resolved;
     // otherwise a stale or placeholder URL gets sent to the receiver.
-    if (streamLoading || isResolvingStream || !selectedStream?.link) {
-      return;
-    }
-
-    // Ensure processedStreamUrl is synchronized with selectedStream.link for non-torrent streams
     if (
-      !selectedStream.link.startsWith('magnet:') &&
-      selectedStream.type !== 'torrent' &&
-      processedStreamUrl !== selectedStream.link
+      !isRemoteSourceReady({
+        selectedStream,
+        processedStreamUrl,
+        processedForLink: processedForLinkRef.current,
+        streamLoading,
+        isResolvingStream,
+      })
     ) {
       return;
     }
@@ -3507,6 +3495,20 @@ const Player = ({route}: Props): React.JSX.Element => {
         </View>
       </SafeAreaView>
     );
+  }
+
+  // Keep both the local player and receiver screen unmounted until the user
+  // chooses a movie server. No torrent is resolved while this dialog is open.
+  if (requiresServerSelection && localDecision === 'online') {
+    return <SafeAreaView style={{flex: 1, backgroundColor: '#000'}}>
+      <OrientationLocker orientation={PORTRAIT} />
+      <MovieServerDialog
+        streams={streamData}
+        loading={streamLoading}
+        onSelect={setSelectedStream}
+        onDismiss={() => {exitFullScreen(); navigation.goBack();}}
+      />
+    </SafeAreaView>;
   }
 
   // Show loading state

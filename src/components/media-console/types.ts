@@ -86,6 +86,8 @@ export interface VideoPlayerProps extends ReactVideoProps {
 
   /** Optional stream status displayed below the title and episode. */
   headerStatus?: string;
+  /** Called when the player starts or stops waiting for data. */
+  onBufferingChange?: (buffering: boolean) => void;
   /** Space reserved for the app's configurable top-right toolbar. */
   headerRightInset?: number;
   controlScale?: number;

@@ -25,6 +25,16 @@ class TorrentStreamServer : NanoHTTPD("127.0.0.1", 0) {
         // With full download off, only this much video past the reader is fetched.
         private const val LIMITED_BUFFER_SECONDS = 60.0
         private const val MIN_LIMITED_READAHEAD_BYTES = 4L * 1024L * 1024L
+        // Only the next few pieces get deadlines. libtorrent treats deadline pieces as
+        // time-critical and, once a deadline passes, requests their blocks from several
+        // peers at once. Deadlines 250 ms apart for a whole minute of read-ahead were
+        // always missed, so bandwidth went to duplicate blocks.
+        private const val CRITICAL_BYTES = 12L * 1024L * 1024L
+        // Until the player reports the duration, assume a two-hour film.
+        private const val ASSUMED_DURATION_SECONDS = 7200.0
+        private const val MIN_BYTES_PER_SECOND = 256.0 * 1024.0
+        // A piece still missing after this long gets its deadline again.
+        private const val DEADLINE_REFRESH_ITERATIONS = 50
     }
 
     var sessionManager: org.libtorrent4j.SessionManager? = null
@@ -85,7 +95,9 @@ class TorrentStreamServer : NanoHTTPD("127.0.0.1", 0) {
             val th = freshHandle(infoHash) ?: return false
             try {
                 if (th.havePiece(pieceIndex)) return true
-                if (waitCount == 0) {
+                // Reconnecting peers or a reset priority must not leave the piece the
+                // reader is blocked on without a deadline.
+                if (waitCount % DEADLINE_REFRESH_ITERATIONS == 0) {
                     th.piecePriority(pieceIndex, Priority.TOP_PRIORITY)
                     th.setPieceDeadline(pieceIndex, 1000)
                 }
@@ -99,8 +111,10 @@ class TorrentStreamServer : NanoHTTPD("127.0.0.1", 0) {
         return false
     }
 
-    // Requests the pieces just ahead of the reader first, in order, so playback
-    // keeps going while the rest of the file downloads at normal priority.
+    // Requests the pieces just ahead of the reader first so playback keeps going
+    // while the rest of the file downloads at normal priority. The nearest pieces are
+    // due when playback reaches them at the video's bitrate; the rest of the
+    // read-ahead only gets top priority.
     private fun prefetchNextPieces(infoHash: String, currentPiece: Int, fileSize: Long) {
         try {
             val th = freshHandle(infoHash) ?: return
@@ -109,12 +123,19 @@ class TorrentStreamServer : NanoHTTPD("127.0.0.1", 0) {
             val pieceLength = ti.pieceLength().toLong()
             val readahead = readaheadBytes(infoHash, fileSize)
             val count = ((readahead + pieceLength - 1) / pieceLength).toInt()
+            val duration = durations[infoHash]?.takeIf { it > 0 } ?: ASSUMED_DURATION_SECONDS
+            val bytesPerSecond = maxOf(fileSize / duration, MIN_BYTES_PER_SECOND)
+            val criticalBytes = maxOf(CRITICAL_BYTES, pieceLength * 2)
             for (i in 1..count) {
                 val next = currentPiece + i
                 if (next >= numPieces) break
-                if (!th.havePiece(next)) {
-                    th.piecePriority(next, Priority.TOP_PRIORITY)
-                    th.setPieceDeadline(next, 1000 + i * 250)
+                if (th.havePiece(next)) continue
+                th.piecePriority(next, Priority.TOP_PRIORITY)
+                val ahead = i * pieceLength
+                if (ahead <= criticalBytes) {
+                    // Due well before playback gets there, never sooner than 1.5 s.
+                    val dueMs = (ahead / bytesPerSecond * 600.0).toLong().coerceIn(1500L, 60_000L)
+                    th.setPieceDeadline(next, dueMs.toInt())
                 }
             }
         } catch (_: Exception) {}

@@ -64,6 +64,7 @@ const AnimatedVideoPlayer = (
     volume = 1,
     title = {primary: '', secondary: ''},
     headerStatus,
+    onBufferingChange,
     ambientVideoSize,
     ambientDisabled = false,
     headerRightInset = 0,
@@ -813,10 +814,11 @@ const AnimatedVideoPlayer = (
   // Memoize onBuffer callback
   const onBuffer = useCallback((e: {isBuffering: boolean}) => {
     setBuffering(e.isBuffering);
+    onBufferingChange?.(e.isBuffering);
     if (!e.isBuffering && !seekingRef.current && (!Platform.isTV || !paused)) {
       setPaused(false);
     }
-  }, [paused]);
+  }, [paused, onBufferingChange]);
 
   // Memoize source URI for dependency comparison - use deep comparison for stability
   const sourceUri = useMemo(() => {

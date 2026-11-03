@@ -4,6 +4,7 @@ export type FilterableStream = Pick<Stream, 'quality' | 'tag' | 'tags'>;
 const languages = [
   ['RU', /\b(RU|RUS|RUSSIAN)\b|русск|🇷🇺/i],
   ['EN', /\b(EN|ENG|ENGLISH|GB|US)\b|англий|🇬🇧|🇺🇸/i],
+  ['UA', /\b(UA|UKR|UKRAINIAN)\b|україн|🇺🇦/i],
   ['MULTI', /\b(MULTI|DUAL)(?:[- ]AUDIO)?\b/i],
   ['JA', /\b(JA|JP|JAPANESE)\b|япон|🇯🇵/i],
   ['KO', /\b(KO|KR|KOREAN)\b|корей|🇰🇷/i],

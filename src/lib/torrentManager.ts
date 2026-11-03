@@ -109,6 +109,17 @@ class TorrentManager {
     );
   }
 
+  /**
+   * Peers the DHT knows for each info hash (lowercase hex). Releases nobody
+   * shares come back with 0.
+   */
+  async probeSwarms(
+    infoHashes: string[],
+  ): Promise<{peers: Record<string, number>; nodes: number}> {
+    await this.init();
+    return await TorrentModule.probeSwarms(infoHashes);
+  }
+
   async getStats(infoHash: string): Promise<TorrentStats> {
     await this.init();
     return await TorrentModule.getStats(infoHash);

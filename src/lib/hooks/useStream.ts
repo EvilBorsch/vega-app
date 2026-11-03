@@ -16,7 +16,18 @@ import useDownloadsStore, {
 import { TextTrackType } from 'react-native-video';
 import { downloadOutputExists } from '../downloadDestination';
 import {guardWafPrompts} from '../services/wafSession';
-import {findRememberedServer, rememberedServerKey, rememberServer} from '../player/rememberedServer';
+import {
+  findRememberedServer,
+  findSimilarStream,
+  rememberedIdentity,
+  rememberedSeriesKey,
+  rememberedServerKey,
+  rememberServer,
+  serverIdentity,
+  type ServerIdentity,
+} from '../player/rememberedServer';
+import {fetchExtraTorrentStreams, mergeTrackerStreams} from '../providers/extraTorrentSources';
+import {streamInfoHash, useSwarmHealth} from '../player/swarmHealth';
 
 interface UseStreamOptions {
   activeEpisode: any;
@@ -371,6 +382,9 @@ export const getCompletedDownloadPathSync = (
 
 // Streams are matched by link because the selected stream is not always the
 // same object as its entry in the list (downloaded file, refetch).
+const torrentHashOf = (link?: string) =>
+  link?.match(/[?&]xt=urn:btih:([^&]+)/i)?.[1]?.toLowerCase() || '';
+
 export const getNextStream = (
   streams: Stream[],
   current: Stream,
@@ -529,12 +543,25 @@ export const fetchStreamList = async ({
     if (signal?.aborted) abort();
     if (canPromptWaf) guardWafPrompts(controller.signal, canPromptWaf);
     try {
-      const data = await providerManager.getStream({
-        link: remoteLink,
-        type: routeParams?.type,
-        signal: controller.signal,
-        providerValue: routeParams?.providerValue || provider,
-      });
+      const providerValue = routeParams?.providerValue || provider;
+      // Torrentio lists only RuTracker and Rutor among Russian trackers, so
+      // JacRed and Knaben releases of the same title are added.
+      const extraStreams = providerValue === 'torrentio'
+        ? fetchExtraTorrentStreams(remoteLink, routeParams?.type, controller.signal)
+        : Promise.resolve([] as Stream[]);
+      let providerStreams: Stream[] = [];
+      try {
+        providerStreams = (await providerManager.getStream({
+          link: remoteLink,
+          type: routeParams?.type,
+          signal: controller.signal,
+          providerValue,
+        })) || [];
+      } catch (providerError) {
+        if (!(await extraStreams).length) throw providerError;
+        console.warn('Provider streams failed; showing tracker releases:', providerError);
+      }
+      const data = mergeTrackerStreams(providerStreams, await extraStreams);
 
       // Filter out excluded qualities
       const excludedQualities = settingsStorage.getExcludedQualities() || [];
@@ -592,16 +619,27 @@ export const useStream = ({
 
   const activeEpisodeKey = getEpisodeIdentity(activeEpisode);
   const serverKey = rememberedServerKey(activeEpisode, routeParams, provider);
-  const isMovie = routeParams?.type === 'movie';
-  const awaitingMovieChoice = useRef(false);
+  const seriesKey = rememberedSeriesKey(routeParams, provider);
+  // Movies and episodes open on a source list; nothing starts on its own.
+  const choosesSource = routeParams?.type === 'movie' || routeParams?.type === 'series';
+  const awaitingSourceChoice = useRef(false);
+  // The source picked in this player session and whether the viewer moved to
+  // another episode since: the next episode continues with the same release.
+  const sessionChoiceRef = useRef<ServerIdentity | undefined>(undefined);
+  const episodeSwitchedRef = useRef(false);
   const selectStream = useCallback((selection: React.SetStateAction<Stream>) => {
-    awaitingMovieChoice.current = false;
+    awaitingSourceChoice.current = false;
     setSelectedStream(current => {
       const next = typeof selection === 'function' ? selection(current) : selection;
       rememberServer(serverKey, next);
+      // A device file says nothing about which release other episodes should use.
+      if (next.type !== 'local' && !isLocalPath(next.link)) {
+        rememberServer(seriesKey, next);
+        sessionChoiceRef.current = serverIdentity(next) || sessionChoiceRef.current;
+      }
       return next;
     });
-  }, [serverKey]);
+  }, [serverKey, seriesKey]);
   const subtitleCacheKey = subtitleVideoKey(activeEpisode, routeParams, provider);
   const {savedSubtitles, saveSubtitle, removeSavedSubtitle} = useSavedSubtitles(subtitleCacheKey);
   const subtitleSourcesRef = useRef({episodeKey: activeEpisodeKey, uris: new Set<string>()});
@@ -619,7 +657,8 @@ export const useStream = ({
       return;
     }
     previousEpisodeKeyRef.current = activeEpisodeKey;
-    awaitingMovieChoice.current = false;
+    awaitingSourceChoice.current = false;
+    episodeSwitchedRef.current = true;
     const path = getCompletedDownloadPathSync(activeEpisode, routeParams);
     setSelectedStream(
       externalVideoStream(routeParams) || (path
@@ -687,7 +726,7 @@ export const useStream = ({
   // Filter cached/placeholder data as soon as playback fails, even while
   // the provider refresh is still pending or has failed itself.
   const initialStreamLink = initialStream?.link;
-  const streamData = useMemo(
+  const listedStreams = useMemo(
     () => localFailed
       ? fetchedStreams.filter(stream =>
           !isLocalPath(stream.link) && stream.link !== initialStreamLink,
@@ -695,6 +734,22 @@ export const useStream = ({
       : fetchedStreams,
     [fetchedStreams, initialStreamLink, localFailed],
   );
+  // Releases nobody shares are hidden once the DHT has been asked. The one
+  // playing and the ones Resume would pick stay, whatever the probe says.
+  const selectedLink = selectedStream?.link;
+  const keepReleases = useMemo(() => new Set([
+    selectedLink,
+    // A refreshed list may carry the playing torrent under another link.
+    streamInfoHash(selectedStream),
+    rememberedIdentity(serverKey)?.torrentHash,
+    rememberedIdentity(seriesKey)?.torrentHash,
+  ].filter((value): value is string => Boolean(value))),
+  [selectedLink, serverKey, seriesKey]);
+  const swarm = useSwarmHealth(listedStreams, {
+    enabled: choosesSource && !routeParams?.localContent,
+    keep: keepReleases,
+  });
+  const streamData = swarm.visible;
 
   useEffect(() => {
     setSelectedStream(current => {
@@ -702,13 +757,27 @@ export const useStream = ({
         isLocalPath(current?.link) || current?.link === initialStreamLink
       );
       if (!current?.link) {
-          if (awaitingMovieChoice.current) return current;
-        if (isMovie && isFetching) return current;
-        const remembered = routeParams?.playbackMode === 'resume'
-          ? findRememberedServer(serverKey, streamData) : undefined;
-        return remembered || (isMovie ? current : streamData[0] || current);
+        if (awaitingSourceChoice.current) return current;
+        // Match a remembered source against fresh results, not a cached list.
+        if (choosesSource && isFetching) return current;
+        // Resume continues this episode's source, or the series' last one; the
+        // next episode in a session continues the release just watched.
+        const remembered = episodeSwitchedRef.current
+          ? findSimilarStream(sessionChoiceRef.current, streamData)
+          : routeParams?.playbackMode === 'resume'
+            ? findRememberedServer(serverKey, streamData) ||
+              findSimilarStream(rememberedIdentity(seriesKey), streamData)
+            : undefined;
+        if (remembered) {
+          rememberServer(serverKey, remembered);
+          sessionChoiceRef.current = serverIdentity(remembered);
+          return remembered;
+        }
+        return choosesSource ? current : streamData[0] || current;
       }
       if (failedDownload) {
+        // Movies and episodes offer the online sources instead of the first one.
+        if (choosesSource) return {server: '', link: '', type: ''};
         return streamData[0] || (error
           ? {server: '', link: '', type: ''}
           : current);
@@ -716,14 +785,20 @@ export const useStream = ({
       // A user-picked local file is independent of the online server list.
       if (current.type === 'local' || isLocalPath(current.link)) return current;
       if (!streamData.length) return current;
-      if (isMovie && !streamData.some(stream => stream.link === current.link)) {
-        return findRememberedServer(serverKey, streamData) || {server: '', link: '', type: ''};
+      if (choosesSource && !streamData.some(stream => stream.link === current.link)) {
+        // New links for the chosen source: the same torrent, or the same server
+        // for links that expire. Another release on that server is a new choice.
+        const hash = torrentHashOf(current.link);
+        const replacement = hash
+          ? streamData.find(stream => torrentHashOf(stream.link) === hash)
+          : findSameServer(streamData, current);
+        return replacement || findRememberedServer(serverKey, streamData) || {server: '', link: '', type: ''};
       }
       return streamData.some(stream => stream.link === current.link)
         ? current
         : findSameServer(streamData, current) || streamData[0];
     });
-  }, [streamData, localFailed, initialStreamLink, error, isMovie, isFetching, routeParams?.playbackMode, serverKey]);
+  }, [streamData, localFailed, initialStreamLink, error, choosesSource, isFetching, routeParams?.playbackMode, serverKey, seriesKey]);
 
   const isPlayingLocal = isLocalPath(selectedStream?.link);
 
@@ -800,7 +875,7 @@ export const useStream = ({
       // Mark failure before reusing cached data or beginning another request.
       localFailedRef.current = true;
       setFailedLocalEpisodeKey(activeEpisodeKey);
-      const online = streamData.find(stream =>
+      const online = choosesSource ? undefined : streamData.find(stream =>
         !isLocalPath(stream.link) && stream.link !== initialStreamLink,
       );
       if (online) {
@@ -810,13 +885,15 @@ export const useStream = ({
         refetch();
       }
       ToastAndroid.show(
-        'Download stream could not be played, Trying online servers',
+        choosesSource
+          ? 'The downloaded file could not be played. Choose an online source.'
+          : 'Download stream could not be played, Trying online servers',
         ToastAndroid.SHORT,
       );
       return true;
     }
-    if (isMovie) {
-      awaitingMovieChoice.current = true;
+    if (choosesSource) {
+      awaitingSourceChoice.current = true;
       setSelectedStream({server: '', link: '', type: ''});
       ToastAndroid.show('This source could not be played. Choose another source or retry.', ToastAndroid.SHORT);
       return true;
@@ -849,13 +926,17 @@ export const useStream = ({
     streamData,
     selectedStream,
     setSelectedStream: selectStream,
-    requiresServerSelection: isMovie && !selectedStream.link && !error,
+    requiresServerSelection: choosesSource && !selectedStream.link && !error,
+    /** Releases hidden because nobody shares them; the source list can show them. */
+    hiddenStreams: swarm.hidden,
+    checkingSwarms: swarm.checking,
+    markReleaseDead: swarm.markDead,
     externalSubs,
     setExternalSubs,
     savedSubtitles,
     saveSubtitle,
     removeSavedSubtitle,
-    isLoading: (isLoading || (isMovie && !selectedStream.link && isFetching)) && !isPlayingLocal,
+    isLoading: (isLoading || (choosesSource && !selectedStream.link && isFetching)) && !isPlayingLocal,
     error: isPlayingLocal ? null : error,
     refetch,
     refreshLinks,

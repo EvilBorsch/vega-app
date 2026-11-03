@@ -8,7 +8,7 @@ import {TVFocusable} from './tv';
 import Text from './ui/Text';
 
 export default function StreamSourceCard({stream, selected = false, preferredFocus = false, onPress}: {
-  stream: Pick<Stream, 'server' | 'quality' | 'tag' | 'tags'>;
+  stream: Pick<Stream, 'server' | 'title' | 'quality' | 'tag' | 'tags'>;
   selected?: boolean;
   preferredFocus?: boolean;
   onPress: () => void;
@@ -16,7 +16,7 @@ export default function StreamSourceCard({stream, selected = false, preferredFoc
   const colors = useM3Colors();
   const badges = streamBadges(stream);
   return <TVFocusable onPress={onPress} hasTVPreferredFocus={preferredFocus}
-    accessibilityLabel={`Play ${stream.server}. ${badges.join(', ')}`}
+    accessibilityLabel={`Play ${stream.server}. ${stream.title ? `${stream.title}. ` : ''}${badges.join(', ')}`}
     accessibilityState={{selected}}
     style={{padding: 14, marginBottom: 8, borderRadius: 16, borderWidth: 1,
       borderColor: selected ? colors.primary : colors.outlineVariant,
@@ -27,14 +27,21 @@ export default function StreamSourceCard({stream, selected = false, preferredFoc
       </View>
       <Text role="titleMedium" style={{color: selected ? colors.onSecondaryContainer : colors.onSurface, flex: 1}}>{stream.server}</Text>
     </View>
+    {!!stream.title && <Text role="bodySmall" numberOfLines={2} style={{color: selected ? colors.onSecondaryContainer : colors.onSurfaceVariant, marginBottom: 9}}>{stream.title}</Text>}
     <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 6}}>
       {badges.map(badge => {
         const seedCount = badge.match(/^(?:👤\s*|S:\s*)(\d+)$/i)?.[1];
+        // Peers the DHT returned just now, for releases without a fresh seeder count.
+        const onlineCount = badge.match(/^👥\s*(\d+)$/)?.[1];
+        const live = seedCount !== undefined || onlineCount !== undefined;
+        const noPeers = badge === 'No peers';
         const quality = /^\d{3,4}p$|^4k$/i.test(badge);
         return <View key={badge} style={{flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 7,
-          backgroundColor: seedCount !== undefined ? '#163D31' : quality ? colors.primaryContainer : colors.surfaceContainerHigh}}>
-          {seedCount !== undefined && <MaterialCommunityIcons name="account-group-outline" size={14} color="#A5E8C8" />}
-          <Text role="labelMedium" style={{color: seedCount !== undefined ? '#A5E8C8' : quality ? colors.onPrimaryContainer : colors.onSurfaceVariant}}>{seedCount !== undefined ? `${seedCount} seeders` : badge}</Text>
+          backgroundColor: live ? '#163D31' : noPeers ? '#4A1F1F' : quality ? colors.primaryContainer : colors.surfaceContainerHigh}}>
+          {live && <MaterialCommunityIcons name={onlineCount !== undefined ? 'access-point' : 'account-group-outline'} size={14} color="#A5E8C8" />}
+          <Text role="labelMedium" style={{color: live ? '#A5E8C8' : noPeers ? '#FFB4AB' : quality ? colors.onPrimaryContainer : colors.onSurfaceVariant}}>
+            {seedCount !== undefined ? `${seedCount} seeders` : onlineCount !== undefined ? `${onlineCount} peers online` : badge}
+          </Text>
         </View>;
       })}
     </View>

@@ -71,6 +71,7 @@ module.exports = () => {
     // Manifest mods execute in reverse order: configure TV before moving its
     // launcher intent onto the color aliases.
     './plugins/with-dynamic-launcher-splash.js',
+    './plugins/with-rotation-relayout.js',
     [
       'react-native-bootsplash',
       {

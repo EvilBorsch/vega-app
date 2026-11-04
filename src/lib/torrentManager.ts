@@ -120,6 +120,27 @@ class TorrentManager {
     return await TorrentModule.probeSwarms(infoHashes);
   }
 
+  /**
+   * Joins each release's swarm for a few seconds and measures connected peers,
+   * seeds and download speed. Keyed by lowercase info hash.
+   */
+  async testSwarms(magnets: string[], seconds: number): Promise<Record<string, any>> {
+    await this.init();
+    return await TorrentModule.testSwarms(magnets.map(normalizeMagnetLink), seconds);
+  }
+
+  /** Keeps a tested release running for the player instead of removing it. */
+  async claimSwarmTest(infoHash: string): Promise<void> {
+    if (!this.isInitialized) return;
+    await TorrentModule.claimSwarmTest(infoHash);
+  }
+
+  /** Stops running swarm tests; a release the player took keeps running. */
+  async cancelSwarmTests(): Promise<void> {
+    if (!this.isInitialized) return;
+    await TorrentModule.cancelSwarmTests();
+  }
+
   async getStats(infoHash: string): Promise<TorrentStats> {
     await this.init();
     return await TorrentModule.getStats(infoHash);

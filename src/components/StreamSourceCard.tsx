@@ -7,11 +7,16 @@ import {useM3Colors} from '../theme/M3PaletteContext';
 import {TVFocusable} from './tv';
 import Text from './ui/Text';
 
-export default function StreamSourceCard({stream, selected = false, preferredFocus = false, onPress}: {
+const TEST_COLORS = {good: '#A5E8C8', ok: '#F2D492', bad: '#FFB4AB', pending: undefined} as const;
+const TEST_ICONS = {good: 'speedometer', ok: 'speedometer-medium', bad: 'alert-circle-outline', pending: 'progress-clock'} as const;
+
+export default function StreamSourceCard({stream, selected = false, preferredFocus = false, onPress, test}: {
   stream: Pick<Stream, 'server' | 'title' | 'quality' | 'tag' | 'tags'>;
   selected?: boolean;
   preferredFocus?: boolean;
   onPress: () => void;
+  /** What briefly joining the release's swarm showed: speed and peers, or why it will not play. */
+  test?: {text: string; tone: 'good' | 'ok' | 'bad' | 'pending'};
 }) {
   const colors = useM3Colors();
   const badges = streamBadges(stream);
@@ -28,6 +33,12 @@ export default function StreamSourceCard({stream, selected = false, preferredFoc
       <Text role="titleMedium" style={{color: selected ? colors.onSecondaryContainer : colors.onSurface, flex: 1}}>{stream.server}</Text>
     </View>
     {!!stream.title && <Text role="bodySmall" numberOfLines={2} style={{color: selected ? colors.onSecondaryContainer : colors.onSurfaceVariant, marginBottom: 9}}>{stream.title}</Text>}
+    {test && (
+      <View accessibilityLabel={test.text} style={{flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 9}}>
+        <MaterialCommunityIcons name={TEST_ICONS[test.tone]} size={16} color={TEST_COLORS[test.tone] || colors.onSurfaceVariant} />
+        <Text role="labelLarge" style={{color: TEST_COLORS[test.tone] || colors.onSurfaceVariant}}>{test.text}</Text>
+      </View>
+    )}
     <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 6}}>
       {badges.map(badge => {
         const seedCount = badge.match(/^(?:👤\s*|S:\s*)(\d+)$/i)?.[1];
@@ -40,7 +51,7 @@ export default function StreamSourceCard({stream, selected = false, preferredFoc
           backgroundColor: live ? '#163D31' : noPeers ? '#4A1F1F' : quality ? colors.primaryContainer : colors.surfaceContainerHigh}}>
           {live && <MaterialCommunityIcons name={onlineCount !== undefined ? 'access-point' : 'account-group-outline'} size={14} color="#A5E8C8" />}
           <Text role="labelMedium" style={{color: live ? '#A5E8C8' : noPeers ? '#FFB4AB' : quality ? colors.onPrimaryContainer : colors.onSurfaceVariant}}>
-            {seedCount !== undefined ? `${seedCount} seeders` : onlineCount !== undefined ? `${onlineCount} peers online` : badge}
+            {seedCount !== undefined ? `${seedCount} seeders` : onlineCount !== undefined ? `~${onlineCount} peers in DHT` : badge}
           </Text>
         </View>;
       })}

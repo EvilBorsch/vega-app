@@ -100,3 +100,15 @@ Emulator (Android 11 x86_64, same code built for x86_64): a series episode opene
 APK SHA-256: `834acd2731f9fe1c08a6581f0f6dce37c8d5ec911b76433bb8308838bc0f2b5a`, versionCode 220, signed with the same local key.
 
 Checks: `npx tsc --noEmit` passes. Full Jest: 150 of 159 suites pass, the same nine upstream suites fail; 1,103 tests pass. Three suites that relied on series auto-selecting the first server were updated for the source list.
+
+## 5.3.0-fixes.11: every source is measured before it is picked
+
+- **The source list measures each release.** When it opens, the top releases are joined for 10 seconds, eight at a time (`TorrentModule.testSwarms`): peers that connected, how many of them have the whole file, how fast the first ~12 MB of the main video arrived. Each card says it in words ("3.2 MB/s · 18 peers (12 seeds)", "No peers connected — will not play", "Checking peers and speed…"), and the list is ordered by that speed: measured releases first, then untested ones by swarm size, failed ones last. "Best quality first" orders by resolution, then speed. Releases not picked are removed with what they downloaded; the one picked keeps its torrent and its connected peers (handed over as `x.pe`), so it starts where the test left off.
+- **No more "two blue people".** The DHT badge reads "~N peers in DHT" and the seeder badge "N seeders", in the list and in the player's source menu.
+- **Rutor search** joins the extra sources: its own search page lists live seeders from its tracker, so its releases rank on fresh counts. Live: The Whale gets 6 Rutor releases, American Crime Story S3E1 one; titles match on whole words ("Кит" does not match "Китай").
+- **The film no longer slides into a corner.** After a rotation the window could keep React Native's old portrait layout; the activity now lays the window out again after every configuration change (also through the Expo config plugin `with-rotation-relayout`).
+- **Downloaded episode fails → online sources are offered**, not the first server; the tests of watch-while-downloading were updated for the source list (they were hidden among the upstream failures of the same suite).
+
+Checks: `npx tsc --noEmit` passes. Full Jest: 151 of 160 suites pass; the nine failing suites are the upstream ones (MMKV bindings in seven, a filename sanitiser and the downloads section), 1,116 tests pass.
+
+APK SHA-256: `5a6f530ec2996d597e5f3d33b2049f487544591f33d81f249f1d94e9725fe77b`, versionCode 221, signed with the same local key. Not run on a device or emulator in this round.

@@ -6,6 +6,7 @@ import {
   matchesJacred,
   matchesWestern,
   mergeTrackerStreams,
+  parseRutor,
   parseTorrentioTarget,
   seasonsInTitle,
   titleVariants,
@@ -172,5 +173,19 @@ describe('search titles', () => {
     expect(seasonsInTitle('Breaking.Bad.S01-S02-S03.1080p')).toEqual([1, 2, 3]);
     expect(seasonsInTitle('Во все тяжкие (1-5 сезоны)')).toEqual([1, 2, 3, 4, 5]);
     expect(seasonsInTitle('Фрирен [ТВ-2] (1—3)')).toEqual([2]);
+  });
+});
+
+describe('Rutor search page', () => {
+  it('reads magnet, name, size and live seeders of each row, with or without a comments column', () => {
+    const html = `<table><tr class="gai"><td>10&nbsp;Апр&nbsp;22</td><td ><a class="downgif" href="//d.rutor.info/download/627299"><img alt="D" /></a><a href="magnet:?xt=urn:btih:914b31d61cf46d686de0e0de9a1b6bfe829b25b8&dn=rutor.info&tr=udp://opentor.net:6969"><img alt="M" /></a>
+<a href="/torrent/627299/x">Американская история преступлений  / American Crime Story [S01-03] (2016-2021) BDRip | LostFilm </a></td> <td align="right">22<img alt="C" /></td>
+<td align="right">19.83&nbsp;GB</td><td align="center"><span class="green"><img alt="S" />&nbsp;5</span>&nbsp;<img alt="L" /><span class="red">&nbsp;2</span></td></tr><tr class="tum"><td>10&nbsp;Ноя&nbsp;21</td><td colspan = "2"><a href="magnet:?xt=urn:btih:55abddda1b722438f9b369664dd86fb4e39388e8&amp;dn=rutor.info"><img alt="M" /></a>
+<a href="/torrent/833446/y">Кит &amp; Co / The Whale (2022) WEBRip 720p</a></td>
+<td align="right">16.20&nbsp;GB</td><td align="center"><span class="green"><img alt="S" />&nbsp;0</span>&nbsp;<img alt="L" /><span class="red">&nbsp;7</span></td></tr></table>`;
+    expect(parseRutor(html)).toEqual([
+      {title: 'Американская история преступлений  / American Crime Story [S01-03] (2016-2021) BDRip | LostFilm', magnet: 'magnet:?xt=urn:btih:914b31d61cf46d686de0e0de9a1b6bfe829b25b8&dn=rutor.info&tr=udp://opentor.net:6969', size: '19.83 GB', seeds: 5, leechers: 2},
+      {title: 'Кит & Co / The Whale (2022) WEBRip 720p', magnet: 'magnet:?xt=urn:btih:55abddda1b722438f9b369664dd86fb4e39388e8&dn=rutor.info', size: '16.20 GB', seeds: 0, leechers: 7},
+    ]);
   });
 });

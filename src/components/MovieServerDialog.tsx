@@ -11,6 +11,9 @@ import LoadingIndicator from './ui/LoadingIndicator';
 import Text from './ui/Text';
 import {TVFocusable} from './tv';
 import ElapsedSeconds from './ElapsedSeconds';
+import {describeTest, freshResult, sortBySpeed, useSwarmTests, type SourceSort} from '../lib/player/swarmTests';
+import {streamInfoHash} from '../lib/player/swarmHealth';
+import {torrentManager} from '../lib/torrentManager';
 
 export default function MovieServerDialog({
   streams,
@@ -41,10 +44,18 @@ export default function MovieServerDialog({
   const [qualities, setQualities] = useState<string[]>([]);
   const [languages, setLanguages] = useState<string[]>([]);
   const [showHidden, setShowHidden] = useState(false);
-  const filtered = useMemo(
+  const [sort, setSort] = useState<SourceSort>('speed');
+  const matching = useMemo(
     () => filterStreams(showHidden ? [...streams, ...hiddenStreams] : streams, qualities, languages),
     [streams, hiddenStreams, showHidden, qualities, languages],
   );
+  // The releases at the top are joined briefly to measure real peers and
+  // speed, so the list can be ordered by what will actually play fast.
+  const [tested, setTested] = useState(matching);
+  const {results, running} = useSwarmTests(tested, !loading);
+  const filtered = useMemo(() => sortBySpeed(matching, results, sort), [matching, results, sort]);
+  React.useEffect(() => setTested(filtered), [filtered]);
+  const testedCount = filtered.filter(stream => freshResult(results, streamInfoHash(stream))).length;
   return (
     <MaterialDialogSurface visible screenSized onDismiss={onDismiss} style={{height: Math.min(720, height - 48), width: Math.min(680, width - 32), maxWidth: 680, padding: 16}}>
       <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8}}>
@@ -70,13 +81,34 @@ export default function MovieServerDialog({
           <StreamFilterControls stacked={landscape} streams={streams} qualities={qualities} languages={languages} onQualities={setQualities} onLanguages={setLanguages} />
         </View>
         <View style={{flex: 1}}>
-        <Text role="labelMedium" style={{color: colors.onSurfaceVariant, marginBottom: 10, marginTop: 4}}>
+        <View style={{flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8, marginTop: 4, flexWrap: 'wrap'}}>
+          {(['speed', 'quality'] as const).map(mode => (
+            <TVFocusable key={mode} onPress={() => setSort(mode)} accessibilityLabel={mode === 'speed' ? 'Sort by speed' : 'Sort by quality'}
+              accessibilityState={{selected: sort === mode}}
+              style={{paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: colors.outlineVariant,
+                backgroundColor: sort === mode ? colors.secondaryContainer : 'transparent'}}>
+              <Text role="labelMedium" style={{color: sort === mode ? colors.onSecondaryContainer : colors.onSurfaceVariant}}>
+                {mode === 'speed' ? 'Fastest first' : 'Best quality first'}
+              </Text>
+            </TVFocusable>
+          ))}
+        </View>
+        <Text role="labelMedium" style={{color: colors.onSurfaceVariant, marginBottom: 10}}>
           {filtered.length} of {streams.length} sources
+          {Object.keys(running).length ? ` · testing speed of ${Object.keys(running).length}…` : testedCount ? ` · ${testedCount} speed-tested` : ''}
           {checking ? ' · checking which releases have peers…' : hiddenStreams.length ? ` · ${hiddenStreams.length} without peers hidden` : ''}
         </Text>
         <FlatList style={{flex: 1}} data={filtered} keyExtractor={(stream, index) => `${stream.server}:${stream.link}:${index}`}
           initialNumToRender={8} windowSize={5} contentContainerStyle={{paddingBottom: 4}}
-          renderItem={({item, index}) => <StreamSourceCard stream={item} preferredFocus={index === 0} onPress={() => onSelect(item)} />}
+          renderItem={({item, index}) => {
+            const hash = streamInfoHash(item);
+            return <StreamSourceCard stream={item} preferredFocus={index === 0} onPress={() => {
+                // A tested release is already connected; the player takes it over.
+                if (hash) torrentManager.claimSwarmTest(hash).catch(() => {});
+                onSelect(item);
+              }}
+              test={describeTest(freshResult(results, hash), Boolean(hash && running[hash]))} />;
+          }}
           ListFooterComponent={hiddenStreams.length ? (
             <TVFocusable onPress={() => setShowHidden(shown => !shown)}
               accessibilityLabel={showHidden ? 'Hide releases without peers' : `Show ${hiddenStreams.length} releases without peers`}

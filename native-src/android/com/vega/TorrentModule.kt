@@ -60,6 +60,12 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         private val health = java.util.concurrent.ConcurrentHashMap<String, StreamHealth>()
         private var watchdog: java.util.concurrent.ScheduledExecutorService? = null
         @Volatile private var sessionStartedAt = 0L
+        // Swarm tests: releases added briefly to measure peers and speed before a choice.
+        private const val TEST_BYTES = 12L * 1024L * 1024L
+        private val testing = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        // Tested releases the player picked; the test leaves them running.
+        private val claimed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        private val testGeneration = java.util.concurrent.atomic.AtomicInteger(0)
         private var sessionManager: SessionManager? = null
         private var streamServer: TorrentStreamServer? = null
         private val torrentHandles = mutableMapOf<String, TorrentHandle>()
@@ -249,6 +255,8 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                     ?: (reactApplicationContext.filesDir.absolutePath + "/torrents")
                 File(downloadDir).mkdirs()
 
+                // A release under a swarm test is the player's now; the test must not remove it.
+                if (expectedHash != null && testing.containsKey(expectedHash)) claimed.add(expectedHash)
                 if (expectedHash != null && removing.remove(expectedHash) != null) {
                     var waits = 0
                     while (waits < 50 && sm.find(Sha1Hash.parseHex(expectedHash))?.isValid == true) {
@@ -788,54 +796,220 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
     fun deleteTorrent(infoHash: String, deleteFiles: Boolean, promise: Promise) {
         VegaLog.e(TAG, "deleteTorrent called for infoHash: $infoHash, deleteFiles: $deleteFiles")
         try {
-            val sm = ensureSession()
-            val th = try { sm.find(Sha1Hash.parseHex(infoHash)) } catch(e: Exception) { null }
-            
-            val pathsToDelete = mutableListOf<String>()
-            val savePath = torrentSavePaths[infoHash]
-            torrentOutputPaths[infoHash]?.let { pathsToDelete.add(it) }
-            if (deleteFiles && th != null && savePath != null) {
-                try {
-                    val ti = th.torrentFile()
-                    if (ti != null) {
-                        val fs = ti.files()
-                        for (i in 0 until fs.numFiles()) {
-                            // If we renamed the file, we can't easily query th for the new name without extra bindings.
-                            // But libtorrent's session remove(th) might not delete files.
-                            // We will delete the original file paths.
-                            pathsToDelete.add(File(savePath, fs.filePath(i)).absolutePath)
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-            
-            if (th != null && sm != null) {
-                removing[infoHash] = System.currentTimeMillis()
-                try { th.pause() } catch (_: Exception) {}
-                try { sm.remove(th) } catch (_: Exception) {}
-            }
-            
-            streamServer?.unregisterTorrent(infoHash)
-            health.remove(infoHash)
-            torrentHandles.remove(infoHash)
-            torrentSavePaths.remove(infoHash)
-            torrentOutputPaths.remove(infoHash)
-
-            for (path in pathsToDelete) {
-                try { 
-                    val f = File(path)
-                    f.delete()
-                    // Delete parent dir if it's empty and not the root savePath
-                    val parent = f.parentFile
-                    if (parent != null && parent.absolutePath != savePath && parent.list()?.isEmpty() == true) {
-                        parent.delete()
-                    }
-                } catch (_: Exception) {}
-            }
-
+            removeTorrent(infoHash, deleteFiles)
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("DELETE_ERROR", e.message, e)
+        }
+    }
+
+    private fun removeTorrent(infoHash: String, deleteFiles: Boolean) {
+        val sm = ensureSession()
+        val th = try { sm.find(Sha1Hash.parseHex(infoHash)) } catch(e: Exception) { null }
+
+        val pathsToDelete = mutableListOf<String>()
+        val savePath = torrentSavePaths[infoHash]
+        torrentOutputPaths[infoHash]?.let { pathsToDelete.add(it) }
+        if (deleteFiles && th != null && savePath != null) {
+            try {
+                val ti = th.torrentFile()
+                if (ti != null) {
+                    val fs = ti.files()
+                    for (i in 0 until fs.numFiles()) {
+                        // libtorrent's remove does not delete files, so the original paths are.
+                        pathsToDelete.add(File(savePath, fs.filePath(i)).absolutePath)
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (th != null) {
+            removing[infoHash] = System.currentTimeMillis()
+            try { th.pause() } catch (_: Exception) {}
+            try { sm.remove(th) } catch (_: Exception) {}
+        }
+
+        streamServer?.unregisterTorrent(infoHash)
+        health.remove(infoHash)
+        claimed.remove(infoHash)
+        torrentHandles.remove(infoHash)
+        torrentSavePaths.remove(infoHash)
+        torrentOutputPaths.remove(infoHash)
+
+        for (path in pathsToDelete) {
+            try {
+                val f = File(path)
+                f.delete()
+                // Delete parent dir if it's empty and not the root savePath
+                val parent = f.parentFile
+                if (parent != null && parent.absolutePath != savePath && parent.list()?.isEmpty() == true) {
+                    parent.delete()
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Adds each candidate release for a few seconds and measures what a viewer would
+     * get: peers that actually connect, seeds among them, and the download speed of
+     * the start of the video. Resolves {hash: {peers, seeds, known, metadata, speed,
+     * maxSpeed, peerList}}. A release the player picks meanwhile is left running.
+     */
+    @ReactMethod
+    fun testSwarms(magnets: ReadableArray, seconds: Int, promise: Promise) {
+        Thread {
+            // A failed test only leaves the list unmeasured; it must not take the app down.
+            try {
+                runSwarmTests(magnets, seconds, promise)
+            } catch (e: Throwable) {
+                VegaLog.w(TAG, "Swarm test failed: ${e.message}")
+                try { promise.reject("TEST_ERROR", e.message, e) } catch (_: Throwable) {}
+            }
+        }.start()
+    }
+
+    private fun runSwarmTests(magnets: ReadableArray, seconds: Int, promise: Promise) {
+        run {
+            val generation = testGeneration.get()
+            val sm = try { ensureSession() } catch (e: Exception) {
+                promise.reject("TEST_ERROR", e.message, e)
+                return
+            }
+            val dir = reactApplicationContext.filesDir.absolutePath + "/torrents"
+            File(dir).mkdirs()
+            val started = mutableListOf<String>()
+            val hashes = mutableListOf<String>()
+            for (i in 0 until magnets.size()) {
+                val magnet = magnets.getString(i) ?: continue
+                val hash = Regex("btih:([a-fA-F0-9]{40})", RegexOption.IGNORE_CASE)
+                    .find(magnet)?.groupValues?.get(1)?.lowercase() ?: continue
+                if (hash in hashes) continue
+                hashes += hash
+                // A torrent already in the session (playing, or tested earlier) is measured as is.
+                if (sm.find(Sha1Hash.parseHex(hash))?.isValid == true) continue
+                try {
+                    testing[hash] = System.currentTimeMillis()
+                    torrentSavePaths[hash] = dir
+                    sm.download(withPublicTrackers(magnet), File(dir), TorrentFlags.AUTO_MANAGED)
+                    takeControl(sm.find(Sha1Hash.parseHex(hash)))
+                    started += hash
+                } catch (e: Exception) {
+                    VegaLog.w(TAG, "Swarm test could not add $hash: ${e.message}")
+                }
+            }
+
+            class Sample {
+                var peers = 0
+                var seeds = 0
+                var known = 0
+                var metadataAt = -1L
+                var maxSpeed = 0
+                val speeds = ArrayList<Int>()
+                val peerList = LinkedHashSet<String>()
+            }
+            val samples = hashes.associateWith { Sample() }
+            val prepared = HashSet<String>()
+            val begin = System.currentTimeMillis()
+            val deadline = begin + seconds.coerceIn(4, 30) * 1000L
+            while (System.currentTimeMillis() < deadline && testGeneration.get() == generation) {
+                for (hash in hashes) {
+                    val th = sm.find(Sha1Hash.parseHex(hash)) ?: continue
+                    if (!th.isValid) continue
+                    val sample = samples.getValue(hash)
+                    try {
+                        val st = th.status()
+                        sample.known = maxOf(sample.known, st.listPeers())
+                        if (st.hasMetadata() && hash !in prepared && hash in started && hash !in claimed) {
+                            prepared += hash
+                            sample.metadataAt = System.currentTimeMillis() - begin
+                            prioritizeTestPieces(th)
+                        }
+                        if (st.hasMetadata() && sample.metadataAt < 0) sample.metadataAt = System.currentTimeMillis() - begin
+                        val peers = th.peerInfo()
+                        sample.peers = maxOf(sample.peers, peers.size)
+                        sample.seeds = maxOf(sample.seeds, peers.count { it.progress() >= 0.999f })
+                        for (peer in peers) {
+                            // "tcp://1.2.3.4:6881" -> "1.2.3.4:6881", the form a magnet's x.pe takes.
+                            if (sample.peerList.size < 40) sample.peerList.add(peer.ip().substringAfter("://"))
+                        }
+                        if (st.hasMetadata()) {
+                            val rate = st.downloadPayloadRate()
+                            sample.speeds.add(rate)
+                            sample.maxSpeed = maxOf(sample.maxSpeed, rate)
+                        }
+                    } catch (_: Exception) {}
+                }
+                Thread.sleep(500)
+            }
+
+            // Release the bandwidth: everything tested goes, except what the player took.
+            for (hash in started) {
+                testing.remove(hash)
+                if (hash !in claimed) {
+                    try { removeTorrent(hash, true) } catch (_: Exception) {}
+                }
+            }
+            for (hash in hashes) testing.remove(hash)
+
+            val result = WritableNativeMap()
+            for (hash in hashes) {
+                val sample = samples.getValue(hash)
+                // The last seconds are the speed a stream would keep; the first are ramp-up.
+                val tail = sample.speeds.takeLast(6)
+                val speed = if (tail.isEmpty()) 0 else tail.sum() / tail.size
+                result.putMap(hash, WritableNativeMap().apply {
+                    putInt("peers", sample.peers)
+                    putInt("seeds", sample.seeds)
+                    putInt("known", sample.known)
+                    putBoolean("metadata", sample.metadataAt >= 0)
+                    putDouble("metadataMs", sample.metadataAt.toDouble())
+                    putDouble("speed", speed.toDouble())
+                    putDouble("maxSpeed", sample.maxSpeed.toDouble())
+                    putArray("peerList", WritableNativeArray().apply { sample.peerList.forEach { pushString(it) } })
+                })
+            }
+            VegaLog.d(TAG, "Swarm test of ${hashes.size} releases done (generation $generation)")
+            promise.resolve(result)
+        }
+    }
+
+    /** The viewer picked a tested release: keep it running for the player. */
+    @ReactMethod
+    fun claimSwarmTest(infoHash: String, promise: Promise) {
+        val hash = infoHash.lowercase()
+        if (testing.containsKey(hash)) claimed.add(hash)
+        promise.resolve(null)
+    }
+
+    /** Stops running swarm tests; a release the player already took keeps running. */
+    @ReactMethod
+    fun cancelSwarmTests(promise: Promise) {
+        testGeneration.incrementAndGet()
+        promise.resolve(null)
+    }
+
+    // Only the start of the largest video downloads during a test: enough to measure
+    // speed, and what the player reads first if the viewer picks this release.
+    private fun prioritizeTestPieces(th: TorrentHandle) {
+        try {
+            val ti = th.torrentFile() ?: return
+            val fs = ti.files()
+            var index = 0
+            var largest = -1L
+            for (i in 0 until fs.numFiles()) {
+                if (fs.fileSize(i) > largest) {
+                    largest = fs.fileSize(i)
+                    index = i
+                }
+            }
+            val pieceLength = ti.pieceLength().toLong()
+            val first = (fs.fileOffset(index) / pieceLength).toInt()
+            val count = maxOf(2L, (TEST_BYTES + pieceLength - 1) / pieceLength).toInt()
+            val last = minOf(ti.numPieces() - 1, first + count - 1)
+            th.prioritizePieces(Priority.array(Priority.IGNORE, ti.numPieces()))
+            for (piece in first..last) th.piecePriority(piece, Priority.TOP_PRIORITY)
+        } catch (e: Exception) {
+            VegaLog.w(TAG, "Swarm test priorities failed: ${e.message}")
         }
     }
 

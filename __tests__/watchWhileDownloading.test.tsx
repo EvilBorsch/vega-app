@@ -292,7 +292,9 @@ describe('useStream with a download stream', () => {
       fetches[1].resolve([{...remote, link: initial.link}, remote]);
     });
     await flush();
-    expect(streams.selectedStream).toEqual(remote);
+    // An episode offers the online sources; the viewer picks one.
+    expect(streams.selectedStream.link).toBe('');
+    expect(streams.requiresServerSelection).toBe(true);
     expect(streams.streamData).toEqual([remote]);
   });
 
@@ -311,7 +313,8 @@ describe('useStream with a download stream', () => {
     await flush();
     act(() => { expect(streams.switchToNextStream()).toBe(true); });
     await flush();
-    expect(streams.selectedStream).toEqual(remote);
+    expect(streams.selectedStream.link).toBe('');
+    expect(streams.requiresServerSelection).toBe(true);
     expect(streams.streamData).toEqual([remote]);
     expect(fetches).toHaveLength(1);
   });
@@ -328,7 +331,7 @@ describe('useStream with a download stream', () => {
     warn.mockRestore();
   });
 
-  it('switches to an online server when it fails before servers load', async () => {
+  it('offers the online servers when it fails before servers load', async () => {
     let switched = false;
     act(() => {
       switched = streams.switchToNextStream();
@@ -340,7 +343,8 @@ describe('useStream with a download stream', () => {
       fetches[1].resolve([remote]);
     });
     await flush();
-    expect(streams.selectedStream).toEqual(remote);
+    expect(streams.requiresServerSelection).toBe(true);
+    expect(streams.streamData).toEqual([remote]);
   });
 });
 

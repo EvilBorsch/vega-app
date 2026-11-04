@@ -875,10 +875,13 @@ export const useStream = ({
       // Mark failure before reusing cached data or beginning another request.
       localFailedRef.current = true;
       setFailedLocalEpisodeKey(activeEpisodeKey);
-      const online = choosesSource ? undefined : streamData.find(stream =>
+      const online = streamData.find(stream =>
         !isLocalPath(stream.link) && stream.link !== initialStreamLink,
       );
-      if (online) {
+      if (online && choosesSource) {
+        // The cached online sources are offered as they are.
+        setSelectedStream({server: '', link: '', type: ''});
+      } else if (online) {
         setSelectedStream(online);
       } else {
         setSelectedStream({server: '', link: '', type: ''});
@@ -893,6 +896,8 @@ export const useStream = ({
       return true;
     }
     if (choosesSource) {
+      // Nothing left to offer: the caller reports the failure instead.
+      if (error && !streamData.length) return false;
       awaitingSourceChoice.current = true;
       setSelectedStream({server: '', link: '', type: ''});
       ToastAndroid.show('This source could not be played. Choose another source or retry.', ToastAndroid.SHORT);

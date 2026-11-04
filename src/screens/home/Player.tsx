@@ -101,6 +101,7 @@ import {
   isTorrentStream,
   resolveTorrentStream,
 } from '../../lib/torrentStream';
+import {freshResult, useSwarmTestStore, withKnownPeers} from '../../lib/player/swarmTests';
 import {
   MAX_TORRENT_PLAYER_RELOADS,
   MAX_TORRENT_RESTARTS,
@@ -1793,7 +1794,11 @@ const Player = ({route}: Props): React.JSX.Element => {
           setTorrentDownloaded(0);
           setTorrentDownloadSpeed(0);
           const resolved = await resolveTorrentStream(selectedStream.link, {
-            addTorrent: link => torrentManager.addTorrent(link),
+            // Peers a swarm test connected to are handed over, so the start
+            // does not wait for trackers and the DHT again.
+            addTorrent: link => torrentManager.addTorrent(
+              withKnownPeers(link, freshResult(useSwarmTestStore.getState().results, torrentInfoHash(normalizeMagnetLink(link)))),
+            ),
             deleteTorrent: hash => torrentManager.deleteTorrent(hash, true),
             findVideoFileIndex,
             prepareVideoFile: (hash, fileIndex) =>

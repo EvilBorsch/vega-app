@@ -1,5 +1,6 @@
 import React, {memo, useCallback, useMemo, useState} from 'react';
 import {filterStreams} from '../lib/player/streamFilters';
+import {badgeLabel} from '../lib/player/streamBadges';
 import StreamFilterControls from './StreamFilterControls';
 import {FlatList, ScrollView, Text, View} from 'react-native';
 import type {Stream} from '../lib/providers/types';
@@ -190,7 +191,7 @@ const PlayerSourceMenu = memo(
               ? [stream.tag]
               : [];
           const tags = rawTags
-            .map(tag => (typeof tag === 'string' ? tag.trim() : ''))
+            .map(tag => (typeof tag === 'string' ? badgeLabel(tag.trim()) : ''))
             .filter(
               tag =>
                 tag &&

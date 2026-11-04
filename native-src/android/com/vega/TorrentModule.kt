@@ -62,6 +62,10 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         @Volatile private var sessionStartedAt = 0L
         // Swarm tests: releases added briefly to measure peers and speed before a choice.
         private const val TEST_BYTES = 12L * 1024L * 1024L
+        // Time after the torrent info a test keeps measuring, and how far past its
+        // window it may go for releases whose info came late.
+        private const val TEST_MIN_DATA_WINDOW_MS = 8_000L
+        private const val TEST_EXTRA_WINDOW_MS = 12_000L
         private val testing = java.util.concurrent.ConcurrentHashMap<String, Long>()
         // Tested releases the player picked; the test leaves them running.
         private val claimed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -277,6 +281,15 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
 
                 if (existing != null && existing.isValid) {
                     takeControl(existing)
+                    // A swarm test let only the first megabytes download; the player
+                    // needs the whole file (prepareVideoFile picks the episode).
+                    if (expectedHash != null && expectedHash in claimed) {
+                        try {
+                            existing.torrentFile()?.let { ti ->
+                                existing.prioritizePieces(Priority.array(Priority.DEFAULT, ti.numPieces()))
+                            }
+                        } catch (_: Exception) {}
+                    }
                     try {
                         if (existing.status().hasMetadata()) {
                             server.registerTorrent(expectedHash!!, File(downloadDir))
@@ -636,6 +649,15 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 }
                 filePriorities[fileIndex] = Priority.DEFAULT
                 applyFilePriorities(th, filePriorities)
+                if (fullDownload) {
+                    // Unchanged file priorities leave piece priorities as they were,
+                    // such as a swarm test's "first megabytes only": the whole file
+                    // must download.
+                    val lastPiece = ((fileOffset + fileSize - 1L) / pieceLength).toInt()
+                    for (pieceIndex in startPiece..lastPiece) {
+                        if (th.piecePriority(pieceIndex) == Priority.IGNORE) th.piecePriority(pieceIndex, Priority.DEFAULT)
+                    }
+                }
                 if (!fullDownload) {
                     // Only the pieces marked below and by the stream server download.
                     th.prioritizePieces(Priority.array(Priority.IGNORE, ti.numPieces()))
@@ -904,27 +926,45 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 var known = 0
                 var metadataAt = -1L
                 var maxSpeed = 0
-                val speeds = ArrayList<Int>()
+                // Payload bytes when the torrent info arrived, the latest count, and
+                // when the test's share of the video was complete.
+                var bytesAtMetadata = -1L
+                var bytes = 0L
+                var doneAt = -1L
                 val peerList = LinkedHashSet<String>()
             }
             val samples = hashes.associateWith { Sample() }
             val prepared = HashSet<String>()
             val begin = System.currentTimeMillis()
-            val deadline = begin + seconds.coerceIn(4, 30) * 1000L
-            while (System.currentTimeMillis() < deadline && testGeneration.get() == generation) {
+            val window = seconds.coerceIn(4, 30) * 1000L
+            // A release whose info came late still gets a few seconds of data, so a
+            // slow start is not taken for a dead swarm.
+            val hardDeadline = begin + window + TEST_EXTRA_WINDOW_MS
+            fun measuring(sample: Sample, now: Long): Boolean {
+                if (sample.doneAt >= 0) return false
+                if (now - begin < window) return true
+                return sample.metadataAt >= 0 && now - begin - sample.metadataAt < TEST_MIN_DATA_WINDOW_MS
+            }
+            while (testGeneration.get() == generation) {
+                val now = System.currentTimeMillis()
+                if (now >= hardDeadline || samples.values.none { measuring(it, now) }) break
                 for (hash in hashes) {
                     val th = sm.find(Sha1Hash.parseHex(hash)) ?: continue
                     if (!th.isValid) continue
                     val sample = samples.getValue(hash)
+                    if (sample.doneAt >= 0) continue
                     try {
                         val st = th.status()
+                        val at = System.currentTimeMillis() - begin
                         sample.known = maxOf(sample.known, st.listPeers())
                         if (st.hasMetadata() && hash !in prepared && hash in started && hash !in claimed) {
                             prepared += hash
-                            sample.metadataAt = System.currentTimeMillis() - begin
                             prioritizeTestPieces(th)
                         }
-                        if (st.hasMetadata() && sample.metadataAt < 0) sample.metadataAt = System.currentTimeMillis() - begin
+                        if (st.hasMetadata() && sample.metadataAt < 0) {
+                            sample.metadataAt = at
+                            sample.bytesAtMetadata = st.totalPayloadDownload()
+                        }
                         val peers = th.peerInfo()
                         sample.peers = maxOf(sample.peers, peers.size)
                         sample.seeds = maxOf(sample.seeds, peers.count { it.progress() >= 0.999f })
@@ -932,15 +972,16 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                             // "tcp://1.2.3.4:6881" -> "1.2.3.4:6881", the form a magnet's x.pe takes.
                             if (sample.peerList.size < 40) sample.peerList.add(peer.ip().substringAfter("://"))
                         }
-                        if (st.hasMetadata()) {
-                            val rate = st.downloadPayloadRate()
-                            sample.speeds.add(rate)
-                            sample.maxSpeed = maxOf(sample.maxSpeed, rate)
+                        if (sample.metadataAt >= 0) {
+                            sample.bytes = st.totalPayloadDownload()
+                            sample.maxSpeed = maxOf(sample.maxSpeed, st.downloadPayloadRate())
+                            if (sample.bytes - sample.bytesAtMetadata >= TEST_BYTES) sample.doneAt = at
                         }
                     } catch (_: Exception) {}
                 }
                 Thread.sleep(500)
             }
+            val finishedAt = System.currentTimeMillis() - begin
 
             // Release the bandwidth: everything tested goes, except what the player took.
             for (hash in started) {
@@ -954,16 +995,21 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
             val result = WritableNativeMap()
             for (hash in hashes) {
                 val sample = samples.getValue(hash)
-                // The last seconds are the speed a stream would keep; the first are ramp-up.
-                val tail = sample.speeds.takeLast(6)
-                val speed = if (tail.isEmpty()) 0 else tail.sum() / tail.size
+                // What arrived after the torrent info, over the time it took: the rate
+                // a stream of this release starts with. libtorrent's rate is a short
+                // average that falls to 0 once the test's pieces are in.
+                val speed = if (sample.metadataAt < 0) 0.0 else {
+                    val end = if (sample.doneAt >= 0) sample.doneAt else finishedAt
+                    val elapsed = maxOf(500L, end - sample.metadataAt)
+                    (sample.bytes - sample.bytesAtMetadata).coerceAtLeast(0L) * 1000.0 / elapsed
+                }
                 result.putMap(hash, WritableNativeMap().apply {
                     putInt("peers", sample.peers)
                     putInt("seeds", sample.seeds)
                     putInt("known", sample.known)
                     putBoolean("metadata", sample.metadataAt >= 0)
                     putDouble("metadataMs", sample.metadataAt.toDouble())
-                    putDouble("speed", speed.toDouble())
+                    putDouble("speed", speed)
                     putDouble("maxSpeed", sample.maxSpeed.toDouble())
                     putArray("peerList", WritableNativeArray().apply { sample.peerList.forEach { pushString(it) } })
                 })

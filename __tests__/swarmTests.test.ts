@@ -10,6 +10,7 @@ import {
   describeTest,
   expectedSpeed,
   nextToTest,
+  slowLanguageHint,
   sortBySpeed,
   testProgress,
   useSwarmTestStore,
@@ -61,8 +62,10 @@ it('keeps direct links above torrents that depend on a swarm', () => {
 it('describes a measured release in words a viewer can act on', () => {
   expect(describeTest(result({speed: 3.2 * 1024 * 1024, peers: 18, seeds: 12}))).toEqual({text: '3.2 MB/s · 18 peers (12 seeds)', tone: 'good'});
   expect(describeTest(result({speed: 100 * 1024}))?.tone).toBe('bad');
-  expect(describeTest(result({metadata: false, peers: 0}))).toEqual({text: "No peers answered in 10 s — likely won't play", tone: 'bad'});
+  expect(describeTest(result({metadata: false, peers: 0}))).toEqual({text: "No peers answered — likely won't play", tone: 'bad'});
   expect(describeTest(result({peers: 0}))?.text).toBe('Torrent info received, but no peer is sending data yet');
+  // Nothing arrived from connected peers: words, not "1 KB/s".
+  expect(describeTest(result({speed: 300, maxSpeed: 0, peers: 3, seeds: 1}))).toEqual({text: 'No video data in the test · 3 peers (1 seeds) connected', tone: 'bad'});
   expect(describeTest(undefined, true)?.tone).toBe('pending');
   expect(describeTest(undefined, false)).toBeUndefined();
 });
@@ -119,12 +122,47 @@ it('keeps results for the next time the list opens', () => {
 describe('default source filters', () => {
   const stream = (quality: string, tags: string[]) => ({quality, tags});
   it('opens on Russian audio at the best quality available in Russian', () => {
-    expect(defaultStreamFilters([stream('2160', ['EN']), stream('1080', ['RU']), stream('720', ['RU'])]))
+    const ru = (quality: string, count: number) => Array.from({length: count}, () => stream(quality, ['RU']));
+    expect(defaultStreamFilters([stream('2160', ['EN']), ...ru('1080', 5), ...ru('720', 3)]))
       .toEqual({languages: ['RU'], qualities: ['1080']});
+  });
+  it('adds the next qualities down until there are a few releases to choose from', () => {
+    // American Crime Story S03E08 in Russian: two 1080p releases, three 720p.
+    const ru = (quality: string, count: number) => Array.from({length: count}, () => stream(quality, ['RU']));
+    expect(defaultStreamFilters([...ru('1080', 2), ...ru('720', 3), ...ru('480', 2)]))
+      .toEqual({languages: ['RU'], qualities: ['1080', '720']});
   });
   it('falls back to English, and to every language when neither is listed', () => {
     expect(defaultStreamFilters([stream('2160', ['EN']), stream('1080', ['FR'])])).toEqual({languages: ['EN'], qualities: ['2160']});
     expect(defaultStreamFilters([stream('720', ['FR'])])).toEqual({languages: [], qualities: ['720']});
     expect(defaultStreamFilters([])).toEqual({languages: [], qualities: []});
   });
+});
+
+it('tests releases again on request', () => {
+  const hash = '9'.repeat(40);
+  useSwarmTestStore.getState().finish([hash], {[hash]: result({metadata: false, peers: 0})});
+  expect(useSwarmTestStore.getState().results[hash]).toBeDefined();
+  useSwarmTestStore.getState().recheck([hash]);
+  expect(useSwarmTestStore.getState().results[hash]).toBeUndefined();
+  expect(useSwarmTestStore.getState().failures[hash]).toBeUndefined();
+});
+
+it('offers English when every Russian release measured slow', () => {
+  // American Crime Story S3: the best Russian pack gave 0.8 MB/s, the English one 4 MB/s.
+  const ru = (hash: string) => ({...release(hash, '1080', ['👤19']), tags: ['👤19', 'RU']});
+  const en = {...release('8', '1080', ['👤22']), tags: ['👤22', 'EN']};
+  const listed = [ru('5'), ru('6'), ru('7')];
+  const slow = {
+    ['5'.repeat(40)]: result({speed: 800 * 1024}),
+    ['6'.repeat(40)]: result({metadata: false, peers: 0}),
+    ['7'.repeat(40)]: result({speed: 200, maxSpeed: 0}),
+  };
+  expect(slowLanguageHint(listed, [...listed, en], slow, ['RU'])).toEqual({
+    language: 'EN', text: 'Russian releases are slow here (fastest 800 KB/s). English ones may be faster.',
+  });
+  // Not while too few are measured, not when one is fast, not without English releases.
+  expect(slowLanguageHint(listed, [...listed, en], {['5'.repeat(40)]: slow['5'.repeat(40)]}, ['RU'])).toBeUndefined();
+  expect(slowLanguageHint(listed, [...listed, en], {...slow, ['6'.repeat(40)]: result({speed: 3e6})}, ['RU'])).toBeUndefined();
+  expect(slowLanguageHint(listed, listed, slow, ['RU'])).toBeUndefined();
 });

@@ -129,3 +129,25 @@ Lampa's query (Russian and original title, year and kind in one request) now als
 - **The speed check** shows its progress ("Checking speed: 8 of 40 releases done, 8 in progress…") with a bar; releases are measured a pack of 8 at a time in the current order and the list re-sorts after each pack. Results are kept for 30 minutes, across restarts.
 
 APK SHA-256: `32d26b81d1f2eb08e3b9953aec36f5de617f72c996d4fc1513d66bc2af103484`, versionCode 222, signed with the same local key. Checks: `tsc` passes; Jest 151 of 160 suites, 1,126 tests pass (the same two upstream failures). Not run on a device in this round.
+
+## 5.3.0-fixes.13: the torrent engine measured, wrong episodes, slow tested releases
+
+**Engines on one PC, same releases, same trackers, 40–60 s each, largest file only:**
+
+| Release | libtorrent defaults | libtorrent with the Android settings | TorrServer (Lampa) | librqbit (desktop) |
+|---|---|---|---|---|
+| Project Hail Mary WEBRip, 15 683 seeders | 110 peers, 19–26 MB/s | 117 peers, 23–25 MB/s | 6 peers, 1.8 MB/s | 1 peer, 0.05–3.9 MB/s |
+| Project Hail Mary, 4 701 seeders | 77 peers, 22 MB/s | 116 peers, 14.5 MB/s | — | 1 peer, 1.9 MB/s |
+
+libtorrent (the Android engine, also qBittorrent's) connects to everyone it can reach, and the app's settings are not holding it back. The problems were in the code around it:
+
+- **Single-episode releases matched every episode.** "3 сезон 8 серия" (LostFilm) was read as a whole season, so episode 8 listed the releases of episodes 1–10 (and would have played the wrong one). Episode numbers are now read from "N сезон M серия", "(1 сезон: 1-10 серии)", "Сезон 1, серия 5" and "[+10 серия]". American Crime Story S03E08 in Russian: 11 real releases instead of 20.
+- **A tested release played with the test's limits.** A swarm test lets only the first 12 MB download; when the player took that torrent over, a single-file release kept every other piece at "don't download" and only fetched what the reader asked for. The player's file selection now lifts that.
+- **The test measured the wrong thing.** Its speed was libtorrent's short rate average over the last 3 s, which drops to 0 once the test's 12 MB are in. It is now the bytes that arrived after the torrent info divided by the time taken; a release whose info came late gets at least 8 more seconds; a release that got nothing says "No video data in the test · N peers (M seeds) connected" instead of "1 KB/s".
+
+**The swarms themselves.** American Crime Story season 3 in Russian is small: the best pack (19 seeders by Torrentio) got its info after 18 s, connected 11 peers of which 1 seed, and ran at 4.4 MB/s, then 0.78 MB/s; two others got no info in 60 s. The English 1080p pack of the same season: 22 peers, 6 seeds, 3.8–4.5 MB/s. When every release shown in Russian measured below 1 MB/s, the list now says so and offers "Show English" (and the other way round).
+
+- The default filter keeps the best quality and adds the next ones down until at least four releases are listed (S03E08: 1080p + 720p, 6 releases).
+- "Recheck" measures the listed releases again.
+
+APK SHA-256: `1e91eb8262fdaf498f3a9e99afed8fe4b1c4abf5b7b39c415fab5d47a466f1c0`, versionCode 223, same local key. `tsc` passes; Jest 151 of 160 suites, 1,131 tests (the same two upstream failures). Not run on a device in this round.

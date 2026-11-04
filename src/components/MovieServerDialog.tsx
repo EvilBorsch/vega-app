@@ -11,7 +11,7 @@ import LoadingIndicator from './ui/LoadingIndicator';
 import Text from './ui/Text';
 import {TVFocusable} from './tv';
 import ElapsedSeconds from './ElapsedSeconds';
-import {describeProgress, describeTest, freshResult, sortBySpeed, testProgress, useSwarmTests, type SourceSort} from '../lib/player/swarmTests';
+import {describeProgress, describeTest, freshResult, slowLanguageHint, sortBySpeed, testProgress, useSwarmTestStore, useSwarmTests, type SourceSort} from '../lib/player/swarmTests';
 import {streamInfoHash} from '../lib/player/swarmHealth';
 import {torrentManager} from '../lib/torrentManager';
 
@@ -61,6 +61,11 @@ export default function MovieServerDialog({
   React.useEffect(() => setTested(filtered), [filtered]);
   const progress = testProgress(filtered, results, running);
   const progressText = describeProgress(progress);
+  const hint = progress.testing ? undefined : slowLanguageHint(filtered, streams, results, languages);
+  // Swarms change: measure the listed releases again.
+  const recheck = () => useSwarmTestStore.getState().recheck(
+    filtered.map(streamInfoHash).filter((hash): hash is string => Boolean(hash)),
+  );
   return (
     <MaterialDialogSurface visible screenSized onDismiss={onDismiss} style={{height: Math.min(720, height - 48), width: Math.min(680, width - 32), maxWidth: 680, padding: 16}}>
       <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8}}>
@@ -104,10 +109,31 @@ export default function MovieServerDialog({
         </Text>
         {progressText ? (
           <View style={{marginBottom: 10}} accessibilityLabel={progressText}>
-            <Text role="labelSmall" style={{color: colors.onSurfaceVariant}}>{progressText}</Text>
+            <View style={{flexDirection: 'row', alignItems: 'center', gap: 8}}>
+              <Text role="labelSmall" style={{color: colors.onSurfaceVariant, flex: 1}}>{progressText}</Text>
+              {!progress.testing && (
+                <TVFocusable onPress={recheck} accessibilityLabel="Check the speed of these releases again"
+                  style={{flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 14,
+                    borderWidth: 1, borderColor: colors.outlineVariant}}>
+                  <MaterialCommunityIcons name="refresh" size={16} color={colors.primary} />
+                  <Text role="labelMedium" style={{color: colors.primary}}>Recheck</Text>
+                </TVFocusable>
+              )}
+            </View>
             <View style={{height: 4, borderRadius: 2, marginTop: 4, backgroundColor: colors.surfaceContainerHighest, overflow: 'hidden'}}>
               <View style={{height: 4, width: `${Math.round((100 * progress.tested) / progress.total)}%`, backgroundColor: colors.primary}} />
             </View>
+          </View>
+        ) : null}
+        {hint ? (
+          <View style={{flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10, padding: 8, borderRadius: 12, backgroundColor: colors.surfaceContainerHigh}}>
+            <MaterialCommunityIcons name="speedometer-slow" size={18} color="#F2C46D" />
+            <Text role="labelMedium" style={{color: colors.onSurface, flex: 1}}>{hint.text}</Text>
+            <TVFocusable onPress={() => setChosen(defaultStreamFilters(streams, [hint.language]))}
+              accessibilityLabel={`Show ${hint.language === 'EN' ? 'English' : 'Russian'} releases`}
+              style={{paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: colors.secondaryContainer}}>
+              <Text role="labelMedium" style={{color: colors.onSecondaryContainer}}>{hint.language === 'EN' ? 'Show English' : 'Show Russian'}</Text>
+            </TVFocusable>
           </View>
         ) : null}
         <FlatList style={{flex: 1}} data={filtered} keyExtractor={(stream, index) => `${stream.server}:${stream.link}:${index}`}

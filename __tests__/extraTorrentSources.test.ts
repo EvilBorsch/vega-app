@@ -238,3 +238,24 @@ describe('cross-posted releases', () => {
     expect(merged[0].server).toBe('RuTracker · Kinozal · Rutor');
   });
 });
+
+describe('single-episode releases', () => {
+  const lostfilm = (title: string) => ({tracker: 'lostfilm', title, sid: 1, magnet: `magnet:?xt=urn:btih:${'a'.repeat(40)}`, relased: 2016, seasons: [3], types: ['serial']});
+  const episode = (n: number) => ({imdbId: 'tt2788432', type: 'series' as const, title: 'American Crime Story', year: '2016–', season: 3, episode: n});
+
+  it('matches "3 сезон 8 серия" only to episode 8', () => {
+    // Every other episode's release used to be offered for episode 8.
+    const release = lostfilm('Американская история преступлений / American Crime Story / 3 сезон 8 серия [2016, 1080p]');
+    expect(matchesJacred(release, episode(8))).toBe(true);
+    expect(matchesJacred(release, episode(9))).toBe(false);
+    expect(matchesJacred(lostfilm('Американская история преступлений / American Crime Story / 3 сезон 10 серия [2016, 1080p]'), episode(8))).toBe(false);
+  });
+
+  it('reads episode ranges without a total and cumulative season packs', () => {
+    expect(matchesJacred({...lostfilm('Американская история преступлений (3 сезон: 1-10 серии) / American Crime Story / 2021'), tracker: 'kinozal'}, episode(8))).toBe(true);
+    expect(matchesJacred({...lostfilm('Американская история преступлений (3 сезон: 1-5 серии) / American Crime Story / 2021'), tracker: 'kinozal'}, episode(8))).toBe(false);
+    expect(matchesJacred({...lostfilm('Американская история преступлений (3 сезон) [+10 серия] [Ultradox] [720p]'), tracker: 'ultradox'}, episode(8))).toBe(true);
+    expect(matchesJacred({...lostfilm('Американская история преступлений (3 сезон) [+6 серия] [Ultradox] [720p]'), tracker: 'ultradox'}, episode(8))).toBe(false);
+    expect(matchesJacred({...lostfilm('Американская история преступлений / Сезон 3, серия 8 / 2021'), tracker: 'rutor'}, episode(8))).toBe(true);
+  });
+});

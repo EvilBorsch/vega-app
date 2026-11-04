@@ -30,6 +30,8 @@ const RESULT_TTL_MS = 15 * 60 * 1000;
 type SwarmTestState = {
   results: Record<string, SwarmTestResult>;
   running: Record<string, true>;
+  /** Failed tests per release; one that did not answer is tested once more. */
+  failures: Record<string, number>;
   start: (hashes: string[]) => void;
   finish: (hashes: string[], results: Record<string, Omit<SwarmTestResult, 'testedAt'>>) => void;
 };
@@ -37,14 +39,19 @@ type SwarmTestState = {
 export const useSwarmTestStore = create<SwarmTestState>(set => ({
   results: {},
   running: {},
+  failures: {},
   start: hashes => set(state => ({running: {...state.running, ...Object.fromEntries(hashes.map(hash => [hash, true as const]))}})),
   finish: (hashes, results) => set(state => {
     const running = {...state.running};
     for (const hash of hashes) delete running[hash];
     const now = Date.now();
     const next = {...state.results};
-    for (const [hash, result] of Object.entries(results)) next[hash] = {...result, testedAt: now};
-    return {running, results: next};
+    const failures = {...state.failures};
+    for (const [hash, result] of Object.entries(results)) {
+      next[hash] = {...result, testedAt: now};
+      if (!result.metadata) failures[hash] = (failures[hash] || 0) + 1;
+    }
+    return {running, results: next, failures};
   }),
 }));
 
@@ -53,9 +60,11 @@ export const freshResult = (results: Record<string, SwarmTestResult>, hash?: str
   return result && Date.now() - result.testedAt < RESULT_TTL_MS ? result : undefined;
 };
 
-/** A tested release that connected to nobody or got no torrent info. */
-export const testFailed = (result?: SwarmTestResult) =>
-  Boolean(result && (!result.metadata || result.peers === 0));
+/** A tested release whose peers did not even send the torrent info. */
+export const testFailed = (result?: SwarmTestResult) => Boolean(result && !result.metadata);
+
+/** Measured speed that streams HD video without waiting. */
+export const GOOD_SPEED = 300 * 1024;
 
 /**
  * Expected speed, in bytes per second, used for sorting. A measured speed wins;
@@ -63,7 +72,7 @@ export const testFailed = (result?: SwarmTestResult) =>
  * seeder snapshot far less), so untested releases rank among each other.
  */
 export const expectedSpeed = (stream: Stream, result?: SwarmTestResult): number => {
-  if (result) return testFailed(result) ? -1 : Math.max(result.speed, result.maxSpeed * 0.5, result.seeds * 20_000);
+  if (result) return testFailed(result) ? -1 : Math.max(result.speed, result.maxSpeed * 0.5);
   const text = [...(stream.tags || []), stream.tag || ''].join(' ');
   const online = Number(text.match(/👥\s*(\d+)/)?.[1] || 0);
   const snapshot = Number(text.match(/≈(\d+) seeders/)?.[1] || 0);
@@ -74,8 +83,10 @@ export const expectedSpeed = (stream: Stream, result?: SwarmTestResult): number 
 export type SourceSort = 'speed' | 'quality';
 
 /**
- * Fastest first: measured releases by speed, then untested ones by swarm size,
- * releases that failed a test last. "Quality" orders by resolution first.
+ * Fastest first: releases measured fast enough to stream, then untested ones by
+ * swarm size, then measured slow ones, releases whose peers did not answer
+ * last. One 10-second test is noisy, so a slow result is not ranked below an
+ * unknown as "dead". "Quality" orders by resolution first.
  */
 export const sortBySpeed = (streams: Stream[], results: Record<string, SwarmTestResult>, sort: SourceSort): Stream[] => {
   const score = (stream: Stream) => {
@@ -83,7 +94,8 @@ export const sortBySpeed = (streams: Stream[], results: Record<string, SwarmTest
     // Direct (non-torrent) links do not depend on a swarm.
     if (stream.type !== 'torrent') return {tier: 0, speed: Number.MAX_SAFE_INTEGER};
     const speed = expectedSpeed(stream, result);
-    return {tier: speed < 0 ? 2 : result ? 0 : 1, speed};
+    if (!result) return {tier: 1, speed};
+    return {tier: speed < 0 ? 3 : speed >= GOOD_SPEED ? 0 : 2, speed};
   };
   const quality = (stream: Stream) => Number(streamQuality(stream)) || 0;
   return streams
@@ -106,12 +118,13 @@ export const describeTest = (result?: SwarmTestResult, running = false): {text: 
   if (!result) return running ? {text: 'Checking peers and speed…', tone: 'pending'} : undefined;
   if (!result.metadata) {
     return result.peers > 0
-      ? {text: `${result.peers} peers connected but sent no torrent info`, tone: 'bad'}
-      : {text: 'No peers connected — will not play', tone: 'bad'};
+      ? {text: `${result.peers} peers connected but sent no torrent info — likely won't play`, tone: 'bad'}
+      : {text: "No peers answered in 10 s — likely won't play", tone: 'bad'};
   }
+  if (result.peers === 0) return {text: 'Torrent info received, but no peer is sending data yet', tone: 'bad'};
   const speed = Math.max(result.speed, result.maxSpeed * 0.5);
   const peers = `${result.peers} peers (${result.seeds} seeds)`;
-  const tone = speed >= 1024 * 1024 ? 'good' : speed >= 300 * 1024 ? 'ok' : 'bad';
+  const tone = speed >= 1024 * 1024 ? 'good' : speed >= GOOD_SPEED ? 'ok' : 'bad';
   return {text: `${formatSpeed(speed)} · ${peers}`, tone};
 };
 
@@ -128,12 +141,20 @@ export const withKnownPeers = (link: string, result?: SwarmTestResult): string =
 };
 
 /** Picks the releases to test next: the first untested torrents of a list. */
-export const nextToTest = (streams: Stream[], results: Record<string, SwarmTestResult>, running: Record<string, true>): string[] => {
+export const nextToTest = (
+  streams: Stream[],
+  results: Record<string, SwarmTestResult>,
+  running: Record<string, true>,
+  failures: Record<string, number> = {},
+): string[] => {
   const hashes: string[] = [];
   for (const stream of streams) {
     if (stream.type !== 'torrent') continue;
     const hash = streamInfoHash(stream);
-    if (!hash || running[hash] || freshResult(results, hash) || hashes.includes(hash)) continue;
+    if (!hash || running[hash] || hashes.includes(hash)) continue;
+    const result = freshResult(results, hash);
+    // A release that did not answer gets a second test; swarms answer unevenly.
+    if (result && !(testFailed(result) && (failures[hash] || 0) < 2)) continue;
     hashes.push(hash);
     if (hashes.length >= SWARM_TEST_BATCH) break;
   }
@@ -148,10 +169,11 @@ export const nextToTest = (streams: Stream[], results: Record<string, SwarmTestR
 export const useSwarmTests = (streams: Stream[], enabled: boolean) => {
   const results = useSwarmTestStore(state => state.results);
   const running = useSwarmTestStore(state => state.running);
+  const failures = useSwarmTestStore(state => state.failures);
   const busy = Object.keys(running).length > 0;
   useEffect(() => {
     if (!enabled || busy || Platform.OS !== 'android') return;
-    const hashes = nextToTest(streams.slice(0, SWARM_TEST_BATCH * 2), results, running);
+    const hashes = nextToTest(streams.slice(0, SWARM_TEST_BATCH * 2), results, running, failures);
     if (!hashes.length) return;
     const magnets = hashes.map(hash => streams.find(stream => streamInfoHash(stream) === hash)!.link);
     const {start, finish} = useSwarmTestStore.getState();
@@ -159,7 +181,7 @@ export const useSwarmTests = (streams: Stream[], enabled: boolean) => {
     torrentManager.testSwarms(magnets, SWARM_TEST_SECONDS)
       .then(found => finish(hashes, found || {}))
       .catch(() => finish(hashes, {}));
-  }, [streams, enabled, busy, results, running]);
+  }, [streams, enabled, busy, results, running, failures]);
   useEffect(() => () => {
     torrentManager.cancelSwarmTests().catch(() => {});
   }, []);

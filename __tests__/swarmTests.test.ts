@@ -32,15 +32,17 @@ const results = {
   ['b'.repeat(40)]: result({speed: 150 * 1024, seeds: 2}),
   ['e'.repeat(40)]: result({metadata: false, peers: 0}),
 };
+// A 10-second test is noisy: slow is ranked below unknown, not as dead.
 
-it('orders by measured speed, then untested by swarm size, and failed releases last', () => {
+
+it('orders fast measured releases, then untested by swarm size, then slow ones, unanswered last', () => {
   const sorted = sortBySpeed([dead, untestedSmall, slow, untestedBig, fast], results, 'speed');
-  expect(sorted.map(stream => stream.link[20])).toEqual(['a', 'b', 'c', 'd', 'e']);
+  expect(sorted.map(stream => stream.link[20])).toEqual(['a', 'c', 'd', 'b', 'e']);
 });
 
 it('can put quality first and speed second', () => {
   const sorted = sortBySpeed([dead, untestedSmall, slow, untestedBig, fast], results, 'quality');
-  expect(sorted.map(stream => stream.link[20])).toEqual(['b', 'd', 'a', 'c', 'e']);
+  expect(sorted.map(stream => stream.link[20])).toEqual(['d', 'b', 'a', 'c', 'e']);
 });
 
 it('keeps direct links above torrents that depend on a swarm', () => {
@@ -51,7 +53,8 @@ it('keeps direct links above torrents that depend on a swarm', () => {
 it('describes a measured release in words a viewer can act on', () => {
   expect(describeTest(result({speed: 3.2 * 1024 * 1024, peers: 18, seeds: 12}))).toEqual({text: '3.2 MB/s · 18 peers (12 seeds)', tone: 'good'});
   expect(describeTest(result({speed: 100 * 1024}))?.tone).toBe('bad');
-  expect(describeTest(result({metadata: false, peers: 0}))).toEqual({text: 'No peers connected — will not play', tone: 'bad'});
+  expect(describeTest(result({metadata: false, peers: 0}))).toEqual({text: "No peers answered in 10 s — likely won't play", tone: 'bad'});
+  expect(describeTest(result({peers: 0}))?.text).toBe('Torrent info received, but no peer is sending data yet');
   expect(describeTest(undefined, true)?.tone).toBe('pending');
   expect(describeTest(undefined, false)).toBeUndefined();
 });
@@ -68,8 +71,15 @@ it('hands the player the peers a test connected to', () => {
 
 it('tests untested torrents a batch at a time', () => {
   const list = [fast, slow, untestedBig, untestedSmall, dead];
-  expect(nextToTest(list, results, {})).toEqual(['c'.repeat(40), 'd'.repeat(40)]);
-  expect(nextToTest(list, results, {['c'.repeat(40)]: true})).toEqual(['d'.repeat(40)]);
+  const triedTwice = {['e'.repeat(40)]: 2};
+  expect(nextToTest(list, results, {}, triedTwice)).toEqual(['c'.repeat(40), 'd'.repeat(40)]);
+  expect(nextToTest(list, results, {['c'.repeat(40)]: true}, triedTwice)).toEqual(['d'.repeat(40)]);
+});
+
+it('tests a release that did not answer once more', () => {
+  const list = [dead];
+  expect(nextToTest(list, results, {}, {['e'.repeat(40)]: 1})).toEqual(['e'.repeat(40)]);
+  expect(nextToTest(list, results, {}, {['e'.repeat(40)]: 2})).toEqual([]);
 });
 
 it('labels seeder and DHT badges in words', () => {

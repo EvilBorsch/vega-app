@@ -3,18 +3,22 @@ jest.mock('../src/lib/storage', () => ({
   mainStorage: {getString: () => undefined, setString: () => {}},
   cacheStorage: {getObject: (key: string) => mockSaved[key], setObject: (key: string, value: unknown) => { mockSaved[key] = value; }},
 }));
-jest.mock('../src/lib/torrentManager', () => ({torrentManager: {testSwarms: jest.fn(), cancelSwarmTests: jest.fn()}}));
+jest.mock('../src/lib/torrentManager', () => ({torrentManager: {monitorSwarms: jest.fn(), swarmStats: jest.fn(), stopSwarmMonitor: jest.fn()}}));
 
 import {
   describeProgress,
   describeTest,
   expectedSpeed,
   nextToTest,
+  sampleState,
+  settleSample,
   slowLanguageHint,
   sortBySpeed,
   testProgress,
   useSwarmTestStore,
   withKnownPeers,
+  withProvisional,
+  type LiveSample,
   type SwarmTestResult,
 } from '../src/lib/player/swarmTests';
 import {badgeLabel} from '../src/lib/player/streamBadges';
@@ -65,7 +69,7 @@ it('describes a measured release in words a viewer can act on', () => {
   expect(describeTest(result({metadata: false, peers: 0}))).toEqual({text: "No peers answered — likely won't play", tone: 'bad'});
   expect(describeTest(result({peers: 0}))?.text).toBe('Torrent info received, but no peer is sending data yet');
   // Nothing arrived from connected peers: words, not "1 KB/s".
-  expect(describeTest(result({speed: 300, maxSpeed: 0, peers: 3, seeds: 1}))).toEqual({text: 'No video data in the test · 3 peers (1 seeds) connected', tone: 'bad'});
+  expect(describeTest(result({speed: 300, maxSpeed: 0, peers: 3, seeds: 1}))).toEqual({text: 'No video data in 30 s · 3 peers (1 seeds) connected', tone: 'bad'});
   expect(describeTest(undefined, true)?.tone).toBe('pending');
   expect(describeTest(undefined, false)).toBeUndefined();
 });
@@ -165,4 +169,51 @@ it('offers English when every Russian release measured slow', () => {
   expect(slowLanguageHint(listed, [...listed, en], {['5'.repeat(40)]: slow['5'.repeat(40)]}, ['RU'])).toBeUndefined();
   expect(slowLanguageHint(listed, [...listed, en], {...slow, ['6'.repeat(40)]: result({speed: 3e6})}, ['RU'])).toBeUndefined();
   expect(slowLanguageHint(listed, listed, slow, ['RU'])).toBeUndefined();
+});
+
+describe('live measuring', () => {
+  const sample = (extra: Partial<LiveSample>): LiveSample => ({
+    metadata: true, elapsedMs: 10_000, dataMs: 5_000, bytes: 0, rate: 0, maxRate: 0,
+    peers: 8, seeds: 3, maxPeers: 8, maxSeeds: 3, known: 40, done: false, peerList: [], ...extra,
+  });
+  const MB = 1024 * 1024;
+
+  it('judges a fast, steady release after a few seconds and a slow one only after 30 s', () => {
+    expect(settleSample(sample({dataMs: 6_000, bytes: 12 * MB, rate: 2 * MB}))?.speed).toBeCloseTo(2 * MB, -3);
+    // Fast on average but falling off: keep watching.
+    expect(settleSample(sample({dataMs: 6_000, bytes: 12 * MB, rate: 100 * 1024}))).toBeUndefined();
+    expect(settleSample(sample({dataMs: 20_000, bytes: 4 * MB, rate: 200 * 1024}))).toBeUndefined();
+    expect(settleSample(sample({dataMs: 30_000, bytes: 6 * MB, rate: 200 * 1024}))?.speed).toBeCloseTo(6 * MB / 30, -3);
+    expect(settleSample(sample({done: true, dataMs: 3_000, bytes: 24 * MB}))?.speed).toBeCloseTo(8 * MB, -3);
+  });
+
+  it('keeps watching a release that sends nothing for up to 2 minutes', () => {
+    // Small swarms often start late; they are not written off at 45 s.
+    expect(settleSample(sample({metadata: false, elapsedMs: 60_000, dataMs: 0}))).toBeUndefined();
+    expect(settleSample(sample({metadata: false, elapsedMs: 120_000, dataMs: 0}))).toMatchObject({metadata: false});
+    expect(settleSample(sample({elapsedMs: 50_000, dataMs: 40_000, bytes: 100 * 1024}))).toBeUndefined();
+    expect(settleSample(sample({elapsedMs: 120_000, dataMs: 110_000, bytes: 100 * 1024}))).toMatchObject({metadata: true});
+  });
+
+  it('lets a stalled release go on in the background without holding a slot', () => {
+    expect(sampleState(undefined)).toBe('starting');
+    expect(sampleState(sample({metadata: false, elapsedMs: 5_000}))).toBe('starting');
+    expect(sampleState(sample({metadata: false, elapsedMs: 9_000}))).toBe('stalled');
+    expect(sampleState(sample({dataMs: 7_000, rate: 0}))).toBe('stalled');
+    expect(sampleState(sample({dataMs: 7_000, rate: 500 * 1024}))).toBe('downloading');
+    expect(describeTest(undefined, true, sample({dataMs: 7_000, rate: 0}))?.text).toBe('No video yet · 8 peers (3 seeds) · still trying');
+  });
+
+  it('shows the speed so far while measuring and ranks by it once it is fast', () => {
+    const live = {['a'.repeat(40)]: sample({dataMs: 9_000, bytes: 18 * MB, rate: 2 * MB})};
+    expect(describeTest(undefined, true, live['a'.repeat(40)])).toEqual({text: 'Measuring… 2.0 MB/s · 8 peers (3 seeds)', tone: 'pending'});
+    const merged = withProvisional({}, live);
+    expect(merged['a'.repeat(40)]).toMatchObject({provisional: true});
+    const sorted = sortBySpeed([untestedBig, fast], merged, 'speed');
+    expect(sorted[0]).toBe(fast);
+    // A slow start does not push a release below the unmeasured ones.
+    const slowStart = withProvisional({}, {['a'.repeat(40)]: sample({dataMs: 9_000, bytes: 1024, rate: 1024})});
+    const measuredSlow = {...slowStart, ['b'.repeat(40)]: results['b'.repeat(40)]};
+    expect(sortBySpeed([slow, fast], measuredSlow, 'speed')[0]).toBe(fast);
+  });
 });

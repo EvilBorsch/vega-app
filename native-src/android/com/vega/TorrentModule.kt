@@ -60,16 +60,13 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         private val health = java.util.concurrent.ConcurrentHashMap<String, StreamHealth>()
         private var watchdog: java.util.concurrent.ScheduledExecutorService? = null
         @Volatile private var sessionStartedAt = 0L
-        // Swarm tests: releases added briefly to measure peers and speed before a choice.
-        private const val TEST_BYTES = 12L * 1024L * 1024L
-        // Time after the torrent info a test keeps measuring, and how far past its
-        // window it may go for releases whose info came late.
-        private const val TEST_MIN_DATA_WINDOW_MS = 8_000L
-        private const val TEST_EXTRA_WINDOW_MS = 12_000L
+        // Swarm monitor: releases added while a source list is open, each downloading
+        // the start of its video, to show their real peers and speed.
+        private const val TEST_BYTES = 24L * 1024L * 1024L
         private val testing = java.util.concurrent.ConcurrentHashMap<String, Long>()
-        // Tested releases the player picked; the test leaves them running.
+        private val monitored = java.util.concurrent.ConcurrentHashMap<String, MonitorSample>()
+        // Monitored releases the player picked; stopping the monitor leaves them running.
         private val claimed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-        private val testGeneration = java.util.concurrent.atomic.AtomicInteger(0)
         private var sessionManager: SessionManager? = null
         private var streamServer: TorrentStreamServer? = null
         private val torrentHandles = mutableMapOf<String, TorrentHandle>()
@@ -871,152 +868,143 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         }
     }
 
+    /** What the monitor has seen of a release since it was added. */
+    private class MonitorSample(val addedAt: Long, val owned: Boolean) {
+        var prepared = false
+        var metadataAt = -1L
+        var bytesAtMetadata = 0L
+        var bytes = 0L
+        var maxRate = 0
+        var maxPeers = 0
+        var maxSeeds = 0
+        var known = 0
+        val peerList = LinkedHashSet<String>()
+    }
+
     /**
-     * Adds each candidate release for a few seconds and measures what a viewer would
-     * get: peers that actually connect, seeds among them, and the download speed of
-     * the start of the video. Resolves {hash: {peers, seeds, known, metadata, speed,
-     * maxSpeed, peerList}}. A release the player picks meanwhile is left running.
+     * Starts measuring releases while a source list is open: each one not already
+     * in the session is added and downloads the start of its main video. Nothing
+     * is decided here; swarmStats reports how each is doing, as often as asked,
+     * and stopSwarmMonitor ends it.
      */
     @ReactMethod
-    fun testSwarms(magnets: ReadableArray, seconds: Int, promise: Promise) {
+    fun monitorSwarms(magnets: ReadableArray, promise: Promise) {
         Thread {
-            // A failed test only leaves the list unmeasured; it must not take the app down.
             try {
-                runSwarmTests(magnets, seconds, promise)
+                val sm = ensureSession()
+                val dir = reactApplicationContext.filesDir.absolutePath + "/torrents"
+                File(dir).mkdirs()
+                for (i in 0 until magnets.size()) {
+                    val magnet = magnets.getString(i) ?: continue
+                    val hash = Regex("btih:([a-fA-F0-9]{40})", RegexOption.IGNORE_CASE)
+                        .find(magnet)?.groupValues?.get(1)?.lowercase() ?: continue
+                    if (monitored.containsKey(hash)) continue
+                    // A release already in the session (playing) is measured as it is.
+                    val present = sm.find(Sha1Hash.parseHex(hash))?.isValid == true
+                    if (!present) {
+                        testing[hash] = System.currentTimeMillis()
+                        torrentSavePaths[hash] = dir
+                        sm.download(withPublicTrackers(magnet), File(dir), TorrentFlags.AUTO_MANAGED)
+                        takeControl(sm.find(Sha1Hash.parseHex(hash)))
+                    }
+                    monitored[hash] = MonitorSample(System.currentTimeMillis(), !present)
+                }
+                promise.resolve(null)
             } catch (e: Throwable) {
-                VegaLog.w(TAG, "Swarm test failed: ${e.message}")
-                try { promise.reject("TEST_ERROR", e.message, e) } catch (_: Throwable) {}
+                VegaLog.w(TAG, "Swarm monitor could not start: ${e.message}")
+                try { promise.reject("MONITOR_ERROR", e.message, e) } catch (_: Throwable) {}
             }
         }.start()
     }
 
-    private fun runSwarmTests(magnets: ReadableArray, seconds: Int, promise: Promise) {
-        run {
-            val generation = testGeneration.get()
-            val sm = try { ensureSession() } catch (e: Exception) {
-                promise.reject("TEST_ERROR", e.message, e)
-                return
-            }
-            val dir = reactApplicationContext.filesDir.absolutePath + "/torrents"
-            File(dir).mkdirs()
-            val started = mutableListOf<String>()
-            val hashes = mutableListOf<String>()
-            for (i in 0 until magnets.size()) {
-                val magnet = magnets.getString(i) ?: continue
-                val hash = Regex("btih:([a-fA-F0-9]{40})", RegexOption.IGNORE_CASE)
-                    .find(magnet)?.groupValues?.get(1)?.lowercase() ?: continue
-                if (hash in hashes) continue
-                hashes += hash
-                // A torrent already in the session (playing, or tested earlier) is measured as is.
-                if (sm.find(Sha1Hash.parseHex(hash))?.isValid == true) continue
-                try {
-                    testing[hash] = System.currentTimeMillis()
-                    torrentSavePaths[hash] = dir
-                    sm.download(withPublicTrackers(magnet), File(dir), TorrentFlags.AUTO_MANAGED)
-                    takeControl(sm.find(Sha1Hash.parseHex(hash)))
-                    started += hash
-                } catch (e: Exception) {
-                    VegaLog.w(TAG, "Swarm test could not add $hash: ${e.message}")
-                }
-            }
-
-            class Sample {
-                var peers = 0
-                var seeds = 0
-                var known = 0
-                var metadataAt = -1L
-                var maxSpeed = 0
-                // Payload bytes when the torrent info arrived, the latest count, and
-                // when the test's share of the video was complete.
-                var bytesAtMetadata = -1L
-                var bytes = 0L
-                var doneAt = -1L
-                val peerList = LinkedHashSet<String>()
-            }
-            val samples = hashes.associateWith { Sample() }
-            val prepared = HashSet<String>()
-            val begin = System.currentTimeMillis()
-            val window = seconds.coerceIn(4, 30) * 1000L
-            // A release whose info came late still gets a few seconds of data, so a
-            // slow start is not taken for a dead swarm.
-            val hardDeadline = begin + window + TEST_EXTRA_WINDOW_MS
-            fun measuring(sample: Sample, now: Long): Boolean {
-                if (sample.doneAt >= 0) return false
-                if (now - begin < window) return true
-                return sample.metadataAt >= 0 && now - begin - sample.metadataAt < TEST_MIN_DATA_WINDOW_MS
-            }
-            while (testGeneration.get() == generation) {
+    /**
+     * How each monitored release is doing: {hash: {metadata, elapsedMs, dataMs,
+     * bytes, rate, maxRate, peers, seeds, maxPeers, maxSeeds, known, done,
+     * peerList}}. bytes and dataMs count from the moment the torrent info arrived.
+     */
+    @ReactMethod
+    fun swarmStats(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            try {
+                val sm = sessionManager
+                val result = WritableNativeMap()
                 val now = System.currentTimeMillis()
-                if (now >= hardDeadline || samples.values.none { measuring(it, now) }) break
-                for (hash in hashes) {
-                    val th = sm.find(Sha1Hash.parseHex(hash)) ?: continue
-                    if (!th.isValid) continue
-                    val sample = samples.getValue(hash)
-                    if (sample.doneAt >= 0) continue
-                    try {
-                        val st = th.status()
-                        val at = System.currentTimeMillis() - begin
-                        sample.known = maxOf(sample.known, st.listPeers())
-                        if (st.hasMetadata() && hash !in prepared && hash in started && hash !in claimed) {
-                            prepared += hash
-                            prioritizeTestPieces(th)
-                        }
-                        if (st.hasMetadata() && sample.metadataAt < 0) {
-                            sample.metadataAt = at
-                            sample.bytesAtMetadata = st.totalPayloadDownload()
-                        }
-                        val peers = th.peerInfo()
-                        sample.peers = maxOf(sample.peers, peers.size)
-                        sample.seeds = maxOf(sample.seeds, peers.count { it.progress() >= 0.999f })
-                        for (peer in peers) {
-                            // "tcp://1.2.3.4:6881" -> "1.2.3.4:6881", the form a magnet's x.pe takes.
-                            if (sample.peerList.size < 40) sample.peerList.add(peer.ip().substringAfter("://"))
-                        }
-                        if (sample.metadataAt >= 0) {
-                            sample.bytes = st.totalPayloadDownload()
-                            sample.maxSpeed = maxOf(sample.maxSpeed, st.downloadPayloadRate())
-                            if (sample.bytes - sample.bytesAtMetadata >= TEST_BYTES) sample.doneAt = at
-                        }
-                    } catch (_: Exception) {}
+                for (i in 0 until hashes.size()) {
+                    val hash = hashes.getString(i)?.lowercase() ?: continue
+                    val sample = monitored[hash] ?: continue
+                    var peersNow = 0
+                    var seedsNow = 0
+                    var rate = 0
+                    val th = try { sm?.find(Sha1Hash.parseHex(hash))?.takeIf { it.isValid } } catch (_: Exception) { null }
+                    if (th != null) {
+                        try {
+                            val st = th.status()
+                            sample.known = maxOf(sample.known, st.listPeers())
+                            if (st.hasMetadata()) {
+                                if (sample.metadataAt < 0) {
+                                    sample.metadataAt = now
+                                    sample.bytesAtMetadata = st.totalPayloadDownload()
+                                }
+                                if (sample.owned && !sample.prepared && hash !in claimed) {
+                                    sample.prepared = true
+                                    prioritizeTestPieces(th)
+                                }
+                                sample.bytes = (st.totalPayloadDownload() - sample.bytesAtMetadata).coerceAtLeast(0L)
+                                rate = st.downloadPayloadRate()
+                                sample.maxRate = maxOf(sample.maxRate, rate)
+                            }
+                            val peers = th.peerInfo()
+                            peersNow = peers.size
+                            seedsNow = peers.count { it.progress() >= 0.999f }
+                            sample.maxPeers = maxOf(sample.maxPeers, peersNow)
+                            sample.maxSeeds = maxOf(sample.maxSeeds, seedsNow)
+                            for (peer in peers) {
+                                // "tcp://1.2.3.4:6881" -> "1.2.3.4:6881", the form a magnet's x.pe takes.
+                                if (sample.peerList.size < 40) sample.peerList.add(peer.ip().substringAfter("://"))
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    result.putMap(hash, WritableNativeMap().apply {
+                        putBoolean("metadata", sample.metadataAt >= 0)
+                        putDouble("elapsedMs", (now - sample.addedAt).toDouble())
+                        putDouble("dataMs", if (sample.metadataAt >= 0) (now - sample.metadataAt).toDouble() else 0.0)
+                        putDouble("bytes", sample.bytes.toDouble())
+                        putDouble("rate", rate.toDouble())
+                        putDouble("maxRate", sample.maxRate.toDouble())
+                        putInt("peers", peersNow)
+                        putInt("seeds", seedsNow)
+                        putInt("maxPeers", sample.maxPeers)
+                        putInt("maxSeeds", sample.maxSeeds)
+                        putInt("known", sample.known)
+                        // The start of the video is in: enough to tell the speed.
+                        putBoolean("done", sample.bytes >= TEST_BYTES * 95 / 100)
+                        putArray("peerList", WritableNativeArray().apply { sample.peerList.forEach { pushString(it) } })
+                    })
                 }
-                Thread.sleep(500)
+                promise.resolve(result)
+            } catch (e: Throwable) {
+                try { promise.reject("MONITOR_ERROR", e.message, e) } catch (_: Throwable) {}
             }
-            val finishedAt = System.currentTimeMillis() - begin
+        }.start()
+    }
 
-            // Release the bandwidth: everything tested goes, except what the player took.
-            for (hash in started) {
+    /**
+     * Ends measuring these releases. The ones the monitor added go, with what
+     * they downloaded, unless the player took them over.
+     */
+    @ReactMethod
+    fun stopSwarmMonitor(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            for (i in 0 until hashes.size()) {
+                val hash = hashes.getString(i)?.lowercase() ?: continue
+                val sample = monitored.remove(hash) ?: continue
                 testing.remove(hash)
-                if (hash !in claimed) {
+                if (sample.owned && hash !in claimed) {
                     try { removeTorrent(hash, true) } catch (_: Exception) {}
                 }
             }
-            for (hash in hashes) testing.remove(hash)
-
-            val result = WritableNativeMap()
-            for (hash in hashes) {
-                val sample = samples.getValue(hash)
-                // What arrived after the torrent info, over the time it took: the rate
-                // a stream of this release starts with. libtorrent's rate is a short
-                // average that falls to 0 once the test's pieces are in.
-                val speed = if (sample.metadataAt < 0) 0.0 else {
-                    val end = if (sample.doneAt >= 0) sample.doneAt else finishedAt
-                    val elapsed = maxOf(500L, end - sample.metadataAt)
-                    (sample.bytes - sample.bytesAtMetadata).coerceAtLeast(0L) * 1000.0 / elapsed
-                }
-                result.putMap(hash, WritableNativeMap().apply {
-                    putInt("peers", sample.peers)
-                    putInt("seeds", sample.seeds)
-                    putInt("known", sample.known)
-                    putBoolean("metadata", sample.metadataAt >= 0)
-                    putDouble("metadataMs", sample.metadataAt.toDouble())
-                    putDouble("speed", speed)
-                    putDouble("maxSpeed", sample.maxSpeed.toDouble())
-                    putArray("peerList", WritableNativeArray().apply { sample.peerList.forEach { pushString(it) } })
-                })
-            }
-            VegaLog.d(TAG, "Swarm test of ${hashes.size} releases done (generation $generation)")
-            promise.resolve(result)
-        }
+            try { promise.resolve(null) } catch (_: Throwable) {}
+        }.start()
     }
 
     /** The viewer picked a tested release: keep it running for the player. */
@@ -1024,13 +1012,6 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
     fun claimSwarmTest(infoHash: String, promise: Promise) {
         val hash = infoHash.lowercase()
         if (testing.containsKey(hash)) claimed.add(hash)
-        promise.resolve(null)
-    }
-
-    /** Stops running swarm tests; a release the player already took keeps running. */
-    @ReactMethod
-    fun cancelSwarmTests(promise: Promise) {
-        testGeneration.incrementAndGet()
         promise.resolve(null)
     }
 

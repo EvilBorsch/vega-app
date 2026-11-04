@@ -151,3 +151,16 @@ libtorrent (the Android engine, also qBittorrent's) connects to everyone it can 
 - "Recheck" measures the listed releases again.
 
 APK SHA-256: `1e91eb8262fdaf498f3a9e99afed8fe4b1c4abf5b7b39c415fab5d47a466f1c0`, versionCode 223, same local key. `tsc` passes; Jest 151 of 160 suites, 1,131 tests (the same two upstream failures). Not run on a device in this round.
+
+## 5.3.0-fixes.14: sources are measured asynchronously
+
+A fixed 10–12 s test called releases dead that then played: a new BitTorrent peer is often let in only by an "optimistic unchoke" that rotates every 30 s, and small swarms can take minutes to send the torrent info. The test is now a monitor that never blocks the list:
+
+- Up to six releases download the start of their video at once; their peers, seeds, bytes and speed are read every second (`TorrentModule.swarmStats`) and shown live on the cards ("Measuring… 2.0 MB/s · 8 peers (3 seeds)").
+- A release with a clear speed is judged at once: its first 24 MB are in, or it has run at 1 MB/s or more for 6 s without falling off. A slow one is judged after 30 s of video (at least 2 MB).
+- A release that sends no torrent info for 8 s, or no video for 6 s, is stalled: it keeps being watched in the background ("No video yet · still trying") but no longer holds a slot, so the next release starts beside it. It is given up after 2 minutes, or after 45 s when its place is needed (16 watched at most).
+- The list re-sorts as results come in; a release still ramping up stays among the unmeasured until it is fast. Results are kept for 30 minutes.
+
+Replayed on libtorrent with the Android settings, American Crime Story S03E08 (six Russian, three English releases): all six Russian releases stalled; at 8 s the English ones started beside them; the English 1080p pack got its info at 6 s and was judged at 11 s (4.8 MB/s, 26 peers). This network varied a lot over the evening: the 15 683-seeder release took 2 s to its info and ran at 23 MB/s in one run, gave nothing for 30 s in another and 9 MB/s after 13 s in a third, which is why no release is written off from its first seconds.
+
+APK SHA-256: `7fed98805a8fac97a9161f8a6f83f0767017c29b33fbde3e605331c560af120b`, versionCode 224, same local key. `tsc` passes; Jest 151 of 160 suites, 1,135 tests (the same two upstream failures). Not run on a device.

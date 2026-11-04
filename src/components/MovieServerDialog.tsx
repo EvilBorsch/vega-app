@@ -56,12 +56,12 @@ export default function MovieServerDialog({
   // The releases at the top are joined briefly to measure real peers and
   // speed, so the list can be ordered by what will actually play fast.
   const [tested, setTested] = useState(matching);
-  const {results, running} = useSwarmTests(tested, !loading);
+  const {results, running, live} = useSwarmTests(tested, !loading);
   const filtered = useMemo(() => sortBySpeed(matching, results, sort), [matching, results, sort]);
   React.useEffect(() => setTested(filtered), [filtered]);
   const progress = testProgress(filtered, results, running);
   const progressText = describeProgress(progress);
-  const hint = progress.testing ? undefined : slowLanguageHint(filtered, streams, results, languages);
+  const hint = slowLanguageHint(filtered, streams, results, languages);
   // Swarms change: measure the listed releases again.
   const recheck = () => useSwarmTestStore.getState().recheck(
     filtered.map(streamInfoHash).filter((hash): hash is string => Boolean(hash)),
@@ -111,7 +111,7 @@ export default function MovieServerDialog({
           <View style={{marginBottom: 10}} accessibilityLabel={progressText}>
             <View style={{flexDirection: 'row', alignItems: 'center', gap: 8}}>
               <Text role="labelSmall" style={{color: colors.onSurfaceVariant, flex: 1}}>{progressText}</Text>
-              {!progress.testing && (
+              {progress.tested > 0 && (
                 <TVFocusable onPress={recheck} accessibilityLabel="Check the speed of these releases again"
                   style={{flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 14,
                     borderWidth: 1, borderColor: colors.outlineVariant}}>
@@ -145,7 +145,7 @@ export default function MovieServerDialog({
                 if (hash) torrentManager.claimSwarmTest(hash).catch(() => {});
                 onSelect(item);
               }}
-              test={describeTest(freshResult(results, hash), Boolean(hash && running[hash]))} />;
+              test={describeTest(freshResult(results, hash), Boolean(hash && running[hash]), hash ? live[hash] : undefined)} />;
           }}
           ListFooterComponent={hiddenStreams.length ? (
             <TVFocusable onPress={() => setShowHidden(shown => !shown)}

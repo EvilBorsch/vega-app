@@ -1,15 +1,23 @@
-jest.mock('../src/lib/storage', () => ({mainStorage: {getString: () => undefined, setString: () => {}}}));
+const mockSaved: Record<string, unknown> = {};
+jest.mock('../src/lib/storage', () => ({
+  mainStorage: {getString: () => undefined, setString: () => {}},
+  cacheStorage: {getObject: (key: string) => mockSaved[key], setObject: (key: string, value: unknown) => { mockSaved[key] = value; }},
+}));
 jest.mock('../src/lib/torrentManager', () => ({torrentManager: {testSwarms: jest.fn(), cancelSwarmTests: jest.fn()}}));
 
 import {
+  describeProgress,
   describeTest,
   expectedSpeed,
   nextToTest,
   sortBySpeed,
+  testProgress,
+  useSwarmTestStore,
   withKnownPeers,
   type SwarmTestResult,
 } from '../src/lib/player/swarmTests';
 import {badgeLabel} from '../src/lib/player/streamBadges';
+import {defaultStreamFilters} from '../src/lib/player/streamFilters';
 
 const release = (hash: string, quality: string, tags: string[] = []) => ({
   server: 'Tracker',
@@ -86,4 +94,37 @@ it('labels seeder and DHT badges in words', () => {
   expect(badgeLabel('👤12')).toBe('12 seeders');
   expect(badgeLabel('👥40')).toBe('~40 peers in DHT');
   expect(badgeLabel('HEVC')).toBe('HEVC');
+});
+
+it('ranks untested releases by seeders and leechers', () => {
+  expect(expectedSpeed(release('f', '1080', ['👤10', '⬇30']))).toBeGreaterThan(expectedSpeed(release('g', '1080', ['👤10'])));
+  expect(badgeLabel('⬇30')).toBe('30 leechers');
+});
+
+it('reports how far the speed check has come', () => {
+  const progress = testProgress([fast, slow, untestedBig, dead], results, {['c'.repeat(40)]: true});
+  expect(progress).toEqual({total: 4, tested: 3, testing: 1});
+  expect(describeProgress(progress)).toBe('Checking speed: 3 of 4 releases done, 1 in progress…');
+  expect(describeProgress({total: 4, tested: 4, testing: 0})).toBe('Speed checked for 4 of 4 releases · fastest first');
+  expect(describeProgress({total: 0, tested: 0, testing: 0})).toBeUndefined();
+});
+
+it('keeps results for the next time the list opens', () => {
+  useSwarmTestStore.getState().start(['f'.repeat(40)]);
+  useSwarmTestStore.getState().finish(['f'.repeat(40)], {['f'.repeat(40)]: result({speed: 2e6})});
+  const saved = mockSaved['SwarmTests:v1'] as Record<string, {speed: number}>;
+  expect(saved['f'.repeat(40)].speed).toBe(2e6);
+});
+
+describe('default source filters', () => {
+  const stream = (quality: string, tags: string[]) => ({quality, tags});
+  it('opens on Russian audio at the best quality available in Russian', () => {
+    expect(defaultStreamFilters([stream('2160', ['EN']), stream('1080', ['RU']), stream('720', ['RU'])]))
+      .toEqual({languages: ['RU'], qualities: ['1080']});
+  });
+  it('falls back to English, and to every language when neither is listed', () => {
+    expect(defaultStreamFilters([stream('2160', ['EN']), stream('1080', ['FR'])])).toEqual({languages: ['EN'], qualities: ['2160']});
+    expect(defaultStreamFilters([stream('720', ['FR'])])).toEqual({languages: [], qualities: ['720']});
+    expect(defaultStreamFilters([])).toEqual({languages: [], qualities: []});
+  });
 });

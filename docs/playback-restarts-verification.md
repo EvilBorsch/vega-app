@@ -114,3 +114,18 @@ Checks: `npx tsc --noEmit` passes. Full Jest: 151 of 160 suites pass; the nine f
 APK SHA-256: `aa75a5ac317daf3e549640692f25018deab92d783584c0cd7b6f09fab54fc7a9`, versionCode 221, signed with the same local key. Not run on a device or emulator in this round.
 
 The same measurement on the desktop (librqbit), run five times on one YTS release with 353 seeders in the index: torrent info in 1.4–2.7 s in four runs and none in 15 s in one; 1–10 of 15–196 known peers connected (most stay "connecting" until their 10 s timeout); speed came in bursts, from 0 to 4.5 MB/s average (peak 23 MB/s). A swarm's reachability changes from minute to minute, which is why a slow or silent result ranks below an untested release instead of hiding it.
+
+## 5.3.0-fixes.12: what Lampa finds, cross-posted seeders, default filters
+
+Lampa has no list of its own: it asks a parser the user sets (Jackett, Prowlarr or TorrServer) and merges results by magnet. The public parsers its plugins (PubTorr, bylampa jackett.js) offer were probed from this network: only jac.red, jacred.su and 87.120.84.218:9117 answered; the others timed out, refused or returned nothing. Every release they returned for The Whale was also in jac.red's answer. Comparing jac.red's Jackett API (Lampa's query) with Vega's search found two bugs:
+
+- **JacRed refuses concurrent requests.** Two requests at once from one client get HTTP 429 (measured: ten sequential requests all 200, two parallel ones 200 + 429). Vega sent its title queries in parallel, lost most of them and then skipped the mirror for 30 minutes. Requests to one host now go one at a time, a 429 is retried after 1.2/2.4 s, and a 429 no longer marks the host broken.
+- **A release posted on several trackers showed its weakest count.** Of 56 American Crime Story releases, 21 are the same torrent on several trackers (the season 3 pack: RuTracker 14 seeders, Kinozal 3, BitRu 1). The newest record won, often BitRu's 1 seeder. Now the highest count stands, leechers too, and the card names every tracker ("RuTracker · Kinozal · BitRu").
+
+Lampa's query (Russian and original title, year and kind in one request) now also runs on jac.red and jacred.su; its probed audio languages set the language badges. Live, after the fixes: Project Hail Mary 152 releases (122 before; one of jac.red's 73 is not in Vega's list), The Whale 95 (the three missing have no seeders), American Crime Story S03E01 54 with every season 3 pack Lampa lists except two without seeders.
+
+- **Leechers** from JacRed, Rutor and the international indexes are shown ("5 leechers", "≈14 seeders, 5 leechers (02.2026)") and count in the order before a release is measured.
+- **Default filters:** the source list opens on Russian audio, or English when no release has Russian, at the best quality among releases in that language, until the viewer changes a filter.
+- **The speed check** shows its progress ("Checking speed: 8 of 40 releases done, 8 in progress…") with a bar; releases are measured a pack of 8 at a time in the current order and the list re-sorts after each pack. Results are kept for 30 minutes, across restarts.
+
+APK SHA-256: `32d26b81d1f2eb08e3b9953aec36f5de617f72c996d4fc1513d66bc2af103484`, versionCode 222, signed with the same local key. Checks: `tsc` passes; Jest 151 of 160 suites, 1,126 tests pass (the same two upstream failures). Not run on a device in this round.

@@ -6,6 +6,9 @@ import {
   matchesJacred,
   matchesWestern,
   mergeTrackerStreams,
+  jackettToJacred,
+  mergeByHash,
+  mergeJacred,
   parseRutor,
   parseTorrentioTarget,
   seasonsInTitle,
@@ -187,5 +190,51 @@ describe('Rutor search page', () => {
       {title: 'Американская история преступлений  / American Crime Story [S01-03] (2016-2021) BDRip | LostFilm', magnet: 'magnet:?xt=urn:btih:914b31d61cf46d686de0e0de9a1b6bfe829b25b8&dn=rutor.info&tr=udp://opentor.net:6969', size: '19.83 GB', seeds: 5, leechers: 2},
       {title: 'Кит & Co / The Whale (2022) WEBRip 720p', magnet: 'magnet:?xt=urn:btih:55abddda1b722438f9b369664dd86fb4e39388e8&dn=rutor.info', size: '16.20 GB', seeds: 0, leechers: 7},
     ]);
+  });
+});
+
+describe('cross-posted releases', () => {
+  const hash = '9a758f234eba38c3b2ea5957d8fa8b11cfdc8a50';
+  const post = (tracker: string, sid: number, pir: number, updateTime: string) => ({
+    tracker, sid, pir, updateTime, title: 'Американская история преступлений (3 сезон: 1-10 серии из 10)',
+    magnet: `magnet:?xt=urn:btih:${hash.toUpperCase()}`, relased: 2021, seasons: [3], types: ['serial'],
+  });
+
+  it('keeps the highest seeder count of a release posted on several trackers and names them all', () => {
+    // The newest record (BitRu, 1 seeder) used to win and hide RuTracker's 14.
+    const [merged] = mergeJacred([
+      post('kinozal', 3, 0, '2026-07-16T00:00:00Z'),
+      post('bitru', 1, 2, '2026-08-13T00:00:00Z'),
+      post('rutracker', 14, 3, '2026-02-04T00:00:00Z'),
+    ]);
+    expect(merged).toMatchObject({sid: 14, pir: 3, trackers: ['rutracker', 'kinozal', 'bitru']});
+    const stream = jacredToStream(merged, Date.parse('2026-11-04T00:00:00Z'));
+    expect(stream.server).toBe('RuTracker · Kinozal · BitRu');
+    expect(stream.tags).toContain('≈14 seeders, 3 leechers (02.2026)');
+  });
+
+  it('shows live leechers next to live seeders', () => {
+    const stream = jacredToStream(post('rutor', 6, 4, new Date().toISOString()));
+    expect(stream.tags).toEqual(expect.arrayContaining(['👤6', '⬇4']));
+  });
+
+  it('reads the Jackett API Lampa uses, with probed audio languages', () => {
+    const torrent = jackettToJacred({
+      Tracker: 'rutracker, kinozal, bitru', Title: 'Кит / The Whale (2022) WEB-DL 1080p', Size: 5_980_000_000,
+      PublishDate: '2023-03-07T07:18:00Z', Seeders: 14, Peers: 5, MagnetUri: `magnet:?xt=urn:btih:${hash}`,
+      languages: ['rus', 'eng'], info: {quality: 1080, videotype: 'sdr', voices: ['Сербин'], types: ['movie'], relased: 2022},
+    })!;
+    expect(torrent).toMatchObject({tracker: 'rutracker', trackers: ['rutracker', 'kinozal', 'bitru'], sid: 14, pir: 5, relased: 2022, types: ['movie']});
+    expect(jacredToStream(torrent).tags).toEqual(expect.arrayContaining(['RU', 'EN']));
+    expect(jackettToJacred({Title: 'no magnet', Link: 'https://x/download'})).toBeUndefined();
+  });
+
+  it('lists a release found by several sources once, with its strongest count', () => {
+    const live = {server: 'Rutor', link: `magnet:?xt=urn:btih:${hash}`, type: 'torrent', tags: ['👤2']};
+    const snapshot = {server: 'RuTracker · Kinozal', link: `magnet:?xt=urn:btih:${hash}&tr=x`, type: 'torrent', tags: ['≈14 seeders (02.2026)']};
+    const merged = mergeByHash([live, snapshot]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].tags).toEqual(['≈14 seeders (02.2026)']);
+    expect(merged[0].server).toBe('RuTracker · Kinozal · Rutor');
   });
 });

@@ -2,7 +2,7 @@ import React, {useMemo, useState} from 'react';
 import {FlatList, View, useWindowDimensions} from 'react-native';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import StreamSourceCard from './StreamSourceCard';
-import {filterStreams} from '../lib/player/streamFilters';
+import {defaultStreamFilters, filterStreams} from '../lib/player/streamFilters';
 import StreamFilterControls from './StreamFilterControls';
 import type {Stream} from '../lib/providers/types';
 import {useM3Colors} from '../theme/M3PaletteContext';
@@ -11,7 +11,7 @@ import LoadingIndicator from './ui/LoadingIndicator';
 import Text from './ui/Text';
 import {TVFocusable} from './tv';
 import ElapsedSeconds from './ElapsedSeconds';
-import {describeTest, freshResult, sortBySpeed, useSwarmTests, type SourceSort} from '../lib/player/swarmTests';
+import {describeProgress, describeTest, freshResult, sortBySpeed, testProgress, useSwarmTests, type SourceSort} from '../lib/player/swarmTests';
 import {streamInfoHash} from '../lib/player/swarmHealth';
 import {torrentManager} from '../lib/torrentManager';
 
@@ -41,8 +41,12 @@ export default function MovieServerDialog({
   const colors = useM3Colors();
   const {height, width} = useWindowDimensions();
   const landscape = width > height;
-  const [qualities, setQualities] = useState<string[]>([]);
-  const [languages, setLanguages] = useState<string[]>([]);
+  // Russian (else English) at the best quality until the viewer picks filters.
+  const [chosen, setChosen] = useState<{qualities: string[]; languages: string[]} | undefined>();
+  const defaults = useMemo(() => defaultStreamFilters(streams), [streams]);
+  const {qualities, languages} = chosen || defaults;
+  const setQualities = (next: string[]) => setChosen({qualities: next, languages});
+  const setLanguages = (next: string[]) => setChosen({qualities, languages: next});
   const [showHidden, setShowHidden] = useState(false);
   const [sort, setSort] = useState<SourceSort>('speed');
   const matching = useMemo(
@@ -55,7 +59,8 @@ export default function MovieServerDialog({
   const {results, running} = useSwarmTests(tested, !loading);
   const filtered = useMemo(() => sortBySpeed(matching, results, sort), [matching, results, sort]);
   React.useEffect(() => setTested(filtered), [filtered]);
-  const testedCount = filtered.filter(stream => freshResult(results, streamInfoHash(stream))).length;
+  const progress = testProgress(filtered, results, running);
+  const progressText = describeProgress(progress);
   return (
     <MaterialDialogSurface visible screenSized onDismiss={onDismiss} style={{height: Math.min(720, height - 48), width: Math.min(680, width - 32), maxWidth: 680, padding: 16}}>
       <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8}}>
@@ -93,11 +98,18 @@ export default function MovieServerDialog({
             </TVFocusable>
           ))}
         </View>
-        <Text role="labelMedium" style={{color: colors.onSurfaceVariant, marginBottom: 10}}>
+        <Text role="labelMedium" style={{color: colors.onSurfaceVariant, marginBottom: progressText ? 4 : 10}}>
           {filtered.length} of {streams.length} sources
-          {Object.keys(running).length ? ` · testing speed of ${Object.keys(running).length}…` : testedCount ? ` · ${testedCount} speed-tested` : ''}
           {checking ? ' · checking which releases have peers…' : hiddenStreams.length ? ` · ${hiddenStreams.length} without peers hidden` : ''}
         </Text>
+        {progressText ? (
+          <View style={{marginBottom: 10}} accessibilityLabel={progressText}>
+            <Text role="labelSmall" style={{color: colors.onSurfaceVariant}}>{progressText}</Text>
+            <View style={{height: 4, borderRadius: 2, marginTop: 4, backgroundColor: colors.surfaceContainerHighest, overflow: 'hidden'}}>
+              <View style={{height: 4, width: `${Math.round((100 * progress.tested) / progress.total)}%`, backgroundColor: colors.primary}} />
+            </View>
+          </View>
+        ) : null}
         <FlatList style={{flex: 1}} data={filtered} keyExtractor={(stream, index) => `${stream.server}:${stream.link}:${index}`}
           initialNumToRender={8} windowSize={5} contentContainerStyle={{paddingBottom: 4}}
           renderItem={({item, index}) => {

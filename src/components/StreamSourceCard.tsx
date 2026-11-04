@@ -2,7 +2,7 @@ import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import React from 'react';
 import {View} from 'react-native';
 import type {Stream} from '../lib/providers/types';
-import {streamBadges} from '../lib/player/streamBadges';
+import {badgeLabel, streamBadges} from '../lib/player/streamBadges';
 import {useM3Colors} from '../theme/M3PaletteContext';
 import {TVFocusable} from './tv';
 import Text from './ui/Text';
@@ -51,7 +51,7 @@ export default function StreamSourceCard({stream, selected = false, preferredFoc
           backgroundColor: live ? '#163D31' : noPeers ? '#4A1F1F' : quality ? colors.primaryContainer : colors.surfaceContainerHigh}}>
           {live && <MaterialCommunityIcons name={onlineCount !== undefined ? 'access-point' : 'account-group-outline'} size={14} color="#A5E8C8" />}
           <Text role="labelMedium" style={{color: live ? '#A5E8C8' : noPeers ? '#FFB4AB' : quality ? colors.onPrimaryContainer : colors.onSurfaceVariant}}>
-            {seedCount !== undefined ? `${seedCount} seeders` : onlineCount !== undefined ? `~${onlineCount} peers in DHT` : badge}
+            {seedCount !== undefined ? `${seedCount} seeders` : onlineCount !== undefined ? `~${onlineCount} peers in DHT` : badgeLabel(badge)}
           </Text>
         </View>;
       })}

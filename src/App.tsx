@@ -54,6 +54,7 @@ import {settingsStorage} from './lib/storage';
 import {syncParallelStreaming} from './lib/parallelStreaming';
 import {updateProvidersService} from './lib/services/UpdateProviders';
 import {extensionManager} from './lib/services/ExtensionManager';
+import {DEFAULT_PROVIDER_RETRY_DELAYS, retryWithDelays} from './lib/utils/retryWithDelays';
 import {extensionStorage} from './lib/storage/extensionStorage';
 import useContentStore from './lib/zustand/contentStore';
 import {QueryClientProvider} from '@tanstack/react-query';
@@ -672,18 +673,24 @@ const App = () => {
 
   // Initialize update service
   useEffect(() => {
-    // First-run setup also works when automatic provider updates are disabled.
-    extensionManager.ensureDefaultProviders().then(() => {
-      const providers = extensionStorage.getInstalledProviders();
-      const store = useContentStore.getState();
-      store.setInstalledProviders(providers);
-      if (!store.provider.value && providers.length) store.setProvider(providers[0]);
-    }).catch(error => console.warn('Default provider setup will retry on next launch:', error));
+    // First-run setup also works when automatic provider updates are disabled,
+    // and tries again a few times when the network is not there yet.
+    const stopDefaultSetup = retryWithDelays(
+      () => extensionManager.ensureDefaultProviders().then(() => {
+        const providers = extensionStorage.getInstalledProviders();
+        const store = useContentStore.getState();
+        store.setInstalledProviders(providers);
+        if (!store.provider.value && providers.length) store.setProvider(providers[0]);
+      }),
+      DEFAULT_PROVIDER_RETRY_DELAYS,
+      error => console.warn('Default provider setup will retry on next launch:', error),
+    );
     // Start automatic update checking at app startup
     updateProvidersService.startAutomaticUpdateCheck();
 
     // Cleanup on unmount
     return () => {
+      stopDefaultSetup();
       updateProvidersService.stopAutomaticUpdateCheck();
     };
   }, []);

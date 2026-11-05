@@ -2,7 +2,6 @@ import type {SavedSubtitle, SubtitleInput} from '../../lib/subtitles/savedSubtit
 import React, {useCallback, useState} from 'react';
 import {Image, View} from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
-import {OrientationLocker, PORTRAIT} from 'react-native-orientation-locker';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {StatusBar} from 'expo-status-bar';
 import {RemoteHeader} from './RemoteHeader';
@@ -89,7 +88,6 @@ export const RemotePlayerScreen: React.FC<RemotePlayerScreenProps> = ({
     <M3PaletteContext.Provider value={colors}>
       <View style={{backgroundColor: colors.background, flex: 1}}>
         <StatusBar style="light" />
-        <OrientationLocker orientation={PORTRAIT} />
 
         {!!(backdrop || poster) && (
           <View

@@ -50,12 +50,8 @@ import {
   cacheStorage,
   settingsStorage,
 } from '../../lib/storage';
-import Orientation, {
-  OrientationLocker,
-  PORTRAIT,
-  LANDSCAPE,
-} from 'react-native-orientation-locker';
 import {SystemBars} from 'react-native-edge-to-edge';
+import {playerOrientation} from '../../lib/player/playerOrientation';
 import VideoPlayer from '../../components/media-console';
 import {playPauseRef} from '../../components/media-console/components/PlayPause/PlayPause';
 import {Back} from '../../components/media-console/components/Back';
@@ -1605,22 +1601,27 @@ const Player = ({route}: Props): React.JSX.Element => {
   const isRemoteActiveRef = useRef(isRemoteActive);
   isRemoteActiveRef.current = isRemoteActive;
 
+  // One place decides the orientation: the screen option react-native-screens
+  // applies while the player is on top, and drops when it leaves. Three
+  // mechanisms used to fight (this option, imperative locks and
+  // OrientationLocker): the source list stayed landscape however the phone was
+  // turned, the app stayed locked to portrait after playback, and a window
+  // rotated under a stale layout drew the video in a corner.
+  const choosingSource = requiresServerSelection && localDecision === 'online';
+  const screenOrientation = playerOrientation({isTV: Platform.isTV, isRemoteActive, choosingSource});
   useEffect(() => {
     if (Platform.isTV) return;
     (navigation as any).setOptions({
-      orientation: isRemoteActive ? 'portrait' : 'landscape',
+      orientation: screenOrientation,
       statusBarHidden: !isRemoteActive,
       navigationBarHidden: !isRemoteActive,
       autoHideHomeIndicator: !isRemoteActive,
     });
-    if (isRemoteActive) {
-      Orientation.lockToPortrait();
-      exitFullScreen();
-    } else {
-      Orientation.lockToLandscape();
-      goFullScreen();
-    }
-  }, [isRemoteActive, navigation]);
+  }, [screenOrientation, isRemoteActive, navigation]);
+  useEffect(() => {
+    if (isRemoteActive) exitFullScreen();
+    else goFullScreen();
+  }, [isRemoteActive]);
   const [isResolvingStream, setIsResolvingStream] = useState(false);
   const progressIntervalRef = useRef<any>(null);
   const [torrentState, setTorrentState] = useState<string>('');
@@ -2761,62 +2762,25 @@ const Player = ({route}: Props): React.JSX.Element => {
     setToast,
   ]);
 
-  // Enter landscape or portrait (when remote active) and fullscreen on mount & focus
+  // Fullscreen on mount and focus; the orientation follows the screen option above.
   useFocusEffect(
     useCallback(() => {
       if (isRemoteActive) {
-        Orientation.lockToPortrait();
         exitFullScreen();
-        return () => {
-          if (!Platform.isTV) {
-            Orientation.lockToPortrait();
-          } else {
-            Orientation.unlockAllOrientations();
-          }
-        };
+        return undefined;
       }
-
-      Orientation.lockToLandscape();
       goFullScreen();
       reapplyFullscreenMode(
         isFullScreenRef.current,
         () => !isRemoteActiveRef.current && isFullScreenRef.current,
       );
-
-      return () => {
-        if (!Platform.isTV) {
-          Orientation.lockToPortrait();
-        } else {
-          Orientation.unlockAllOrientations();
-        }
-        exitFullScreen();
-      };
+      return () => exitFullScreen();
     }, [isRemoteActive]),
   );
 
   useEffect(() => {
-    if (isRemoteActive) {
-      Orientation.lockToPortrait();
-      exitFullScreen();
-      return () => {
-        if (!Platform.isTV) {
-          Orientation.lockToPortrait();
-        } else {
-          Orientation.unlockAllOrientations();
-        }
-      };
-    }
-
-    Orientation.lockToLandscape();
-    goFullScreen();
-    return () => {
-      if (!Platform.isTV) {
-        Orientation.lockToPortrait();
-      } else {
-        Orientation.unlockAllOrientations();
-      }
-      exitFullScreen();
-    };
+    if (isRemoteActive) return undefined;
+    return () => exitFullScreen();
   }, [isRemoteActive]);
 
   useEffect(() => {
@@ -3617,7 +3581,6 @@ const Player = ({route}: Props): React.JSX.Element => {
         className="bg-black flex-1 justify-center items-center">
         <SystemBars hidden={true} />
         <StatusBar translucent={true} hidden={true} />
-        <OrientationLocker orientation={LANDSCAPE} />
         {/* Same back arrow as the main player's top-left control */}
         <SafeAreaView
           style={{position: 'absolute', top: 0, left: 0, padding: 8}}>
@@ -3680,7 +3643,6 @@ const Player = ({route}: Props): React.JSX.Element => {
   // chooses a movie server. No torrent is resolved while this dialog is open.
   if (requiresServerSelection && localDecision === 'online') {
     return <SafeAreaView style={{flex: 1, backgroundColor: '#000'}}>
-      <OrientationLocker orientation={PORTRAIT} />
       <MovieServerDialog
         streams={streamData}
         loading={streamLoading}
@@ -3709,7 +3671,6 @@ const Player = ({route}: Props): React.JSX.Element => {
         className="bg-black flex-1 justify-center items-center">
         <SystemBars hidden={true} />
         <StatusBar translucent={true} hidden={true} />
-        <OrientationLocker orientation={LANDSCAPE} />
         {/* create ripple effect */}
         <TouchableNativeFeedback
           background={TouchableNativeFeedback.Ripple(
@@ -3746,7 +3707,6 @@ const Player = ({route}: Props): React.JSX.Element => {
       <SafeAreaView className="bg-black flex-1 justify-center items-center">
         <SystemBars hidden={true} />
         <StatusBar translucent={true} hidden={true} />
-        <OrientationLocker orientation={LANDSCAPE} />
         <Text className="text-red-500 text-lg text-center mb-2">
           Could not load the list of sources
         </Text>
@@ -3804,11 +3764,6 @@ const Player = ({route}: Props): React.JSX.Element => {
       className="bg-black flex-1 relative">
       <SystemBars hidden={!isRemoteActive && isFullScreen} />
       <StatusBar translucent={true} hidden={!isRemoteActive} />
-      {isRemoteActive ? (
-        <OrientationLocker orientation={PORTRAIT} />
-      ) : (
-        <OrientationLocker orientation={LANDSCAPE} />
-      )}
 
       {/* Local or Remote player */}
       {isRemoteActive ? (

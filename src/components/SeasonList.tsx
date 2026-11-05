@@ -113,6 +113,7 @@ interface PlayHandlerProps {
   episodeData: EpisodeLink[] | Link['directLinks'];
   /** Opens the cast screen instead of the local or external player. */
   cast?: boolean;
+  playbackMode?: 'play' | 'resume';
 }
 
 interface LastPlayed {
@@ -903,6 +904,7 @@ const SeasonListContent: React.FC<SeasonListProps> = ({
       seasonTitle,
       episodeData,
       cast,
+      playbackMode = 'play',
     }: PlayHandlerProps) => {
       if (!episodeData || episodeData.length === 0) {
         return;
@@ -961,6 +963,7 @@ const SeasonListContent: React.FC<SeasonListProps> = ({
         providerValue: providerValue,
         infoUrl: routeParams.link,
         alwaysCast: !isTV && (cast || settingsStorage.isAlwaysCastMode()),
+        playbackMode,
       });
     },
     [
@@ -1591,7 +1594,7 @@ const SeasonListContent: React.FC<SeasonListProps> = ({
   }, [lastPlayed, lastSeason, seasonItems]);
 
   const playLink = useCallback(
-    (link: string) => {
+    (link: string, playbackMode: 'play' | 'resume' = 'resume') => {
       const index = seasonItems.findIndex(item => item.link === link);
       if (index < 0) return;
       const range = rangeForIndex(episodeRanges, index);
@@ -1605,6 +1608,7 @@ const SeasonListContent: React.FC<SeasonListProps> = ({
         primaryTitle: metaTitle,
         seasonTitle: activeSeason?.title || '',
         episodeData: seasonPlayable,
+        playbackMode,
       });
     },
     [

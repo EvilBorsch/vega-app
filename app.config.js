@@ -71,6 +71,7 @@ module.exports = () => {
     // Manifest mods execute in reverse order: configure TV before moving its
     // launcher intent onto the color aliases.
     './plugins/with-dynamic-launcher-splash.js',
+    './plugins/with-rotation-relayout.js',
     [
       'react-native-bootsplash',
       {
@@ -152,7 +153,7 @@ module.exports = () => {
       autolinking: {exclude: ['expo-splash-screen']},
       plugins,
       slug: 'vega',
-      version: '5.3.0',
+      version: '5.3.0-fixes.19',
       userInterfaceStyle: 'dark',
       experiments: {
         reactCompiler: true,
@@ -162,7 +163,7 @@ module.exports = () => {
           ? {googleServicesFile: androidGoogleServicesFile}
           : {}),
         package: PACKAGE_NAME,
-        versionCode: 214,
+        versionCode: 229,
         permissions: [
           'FOREGROUND_SERVICE',
           'FOREGROUND_SERVICE_DATA_SYNC',

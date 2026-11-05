@@ -19,7 +19,9 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         // MKV Cues and a trailing MP4 moov live here; players read them before playing.
         private const val STREAM_TAIL_BYTES = 2L * 1024L * 1024L
         // Many magnets from providers carry no trackers, which leaves peer discovery to
-        // the DHT alone. These public trackers find peers in a few seconds.
+        // the DHT alone. These public trackers find peers in a few seconds. Torrentio
+        // drops a release's own trackers, so RuTracker's and Rutor's announce URLs are
+        // added too: most of their swarms are behind them.
         private val PUBLIC_TRACKERS = listOf(
             "udp://tracker.opentrackr.org:1337/announce",
             "udp://open.demonii.com:1337/announce",
@@ -27,14 +29,58 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
             "udp://tracker.torrent.eu.org:451/announce",
             "udp://exodus.desync.com:6969/announce",
             "udp://explodie.org:6969/announce",
-            "udp://tracker.tiny-vps.com:6969/announce",
-            "udp://tracker.openbittorrent.com:6969/announce"
+            "udp://open.tracker.cl:1337/announce",
+            "udp://tracker.qu.ax:6969/announce",
+            "udp://tracker.theoks.net:6969/announce",
+            "udp://tracker.tryhackx.org:6969/announce",
+            "udp://tracker-udp.gbitt.info:80/announce",
+            "udp://tracker.gmi.gd:6969/announce",
+            "http://tracker.dler.org:6969/announce",
+            "udp://retracker01-msk-virt.corbina.net:80/announce",
+            "udp://opentor.net:6969",
+            "http://retracker.local/announce",
+            "http://bt.t-ru.org/ann?magnet",
+            "http://bt2.t-ru.org/ann?magnet"
         )
+        // A stream whose peers send nothing is nudged the way re-opening the source
+        // used to fix it: first a fresh announce, then new peer connections.
+        private const val WATCHDOG_INTERVAL_MS = 2_000L
+        // A swarm that sends torrent info does so within seconds; a stuck attempt is
+        // added again (from JS), which on its own was what re-opening the source did.
+        private const val METADATA_TIMEOUT_SECONDS = 30
+        // Swarm probe: DHT get_peers for every listed release, twice, since a single
+        // lookup on a fresh routing table misses some live swarms.
+        private const val PROBE_ROUND_MS = 3_500L
+        private const val PROBE_ROUNDS = 2
+        private const val PROBE_BOOTSTRAP_MS = 6_000L
+        private const val STALL_REANNOUNCE_MS = 10_000L
+        private const val STALL_RECONNECT_MS = 30_000L
+        private const val REANNOUNCE_GAP_MS = 20_000L
+        private const val RECONNECT_GAP_MS = 45_000L
+        private val health = java.util.concurrent.ConcurrentHashMap<String, StreamHealth>()
+        private var watchdog: java.util.concurrent.ScheduledExecutorService? = null
+        @Volatile private var sessionStartedAt = 0L
+        // Swarm monitor: releases added while a source list is open, each downloading
+        // the start of its video, to show their real peers and speed.
+        private const val TEST_BYTES = 24L * 1024L * 1024L
+        private val testing = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        private val monitored = java.util.concurrent.ConcurrentHashMap<String, MonitorSample>()
+        // Public trackers asked for live seeder counts (BEP 15 UDP scrape).
+        private val SCRAPE_TRACKERS = listOf(
+            "tracker.opentrackr.org" to 1337, "open.stealth.si" to 80, "tracker.torrent.eu.org" to 451,
+            "exodus.desync.com" to 6969, "open.demonii.com" to 1337, "tracker.qu.ax" to 6969,
+            "opentor.net" to 6969, "retracker01-msk-virt.corbina.net" to 80,
+        )
+        // Monitored releases the player picked; stopping the monitor leaves them running.
+        private val claimed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private var sessionManager: SessionManager? = null
         private var streamServer: TorrentStreamServer? = null
         private val torrentHandles = mutableMapOf<String, TorrentHandle>()
         private val torrentSavePaths = mutableMapOf<String, String>()
         private val torrentOutputPaths = mutableMapOf<String, String>()
+        // libtorrent removes torrents asynchronously. Adding the same hash right after
+        // a delete (a retry) must not pick up the handle that is about to disappear.
+        private val removing = java.util.concurrent.ConcurrentHashMap<String, Long>()
     }
 
     override fun getName(): String = "TorrentModule"
@@ -46,13 +92,26 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         val sp = SettingsPack()
         sp.setEnableDht(true)
         sp.setEnableLsd(true)
-        sp.listenInterfaces("0.0.0.0:6881,0.0.0.0:6891")
+        // A system-chosen port: networks that throttle BitTorrent's well-known 6881-6891
+        // drop the UDP replies the DHT and trackers depend on, so magnets never find peers.
+        sp.listenInterfaces("0.0.0.0:0")
         sp.setDhtBootstrapNodes("router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.aelitis.com:6881")
         // Streaming waits on single pieces, so a slow peer must not hold a block for
         // libtorrent's default 20 s (piece) or 60 s (request) before it is re-requested.
-        sp.setInteger(settings_pack.int_types.piece_timeout.swigValue(), 6)
-        sp.setInteger(settings_pack.int_types.request_timeout.swigValue(), 12)
+        // Shorter limits (6 s / 12 s before) snubbed ordinary mobile peers: a snubbed
+        // peer gets one request at a time, which kept whole swarms slow.
+        sp.setInteger(settings_pack.int_types.piece_timeout.swigValue(), 12)
+        sp.setInteger(settings_pack.int_types.request_timeout.swigValue(), 25)
         sp.setInteger(settings_pack.int_types.peer_connect_timeout.swigValue(), 7)
+        // Deeper request pipelines for fast peers on high-latency mobile links.
+        sp.setInteger(settings_pack.int_types.max_out_request_queue.swigValue(), 1500)
+        // Streams are not auto-managed (see takeControl); downloads still are, and
+        // libtorrent's default of 3 active ones queued new torrents behind stale ones.
+        sp.setInteger(settings_pack.int_types.active_downloads.swigValue(), 12)
+        sp.setInteger(settings_pack.int_types.active_limit.swigValue(), 30)
+        // The default 8 KB/s DHT budget would spread a swarm probe of a hundred
+        // releases over a minute.
+        sp.setInteger(settings_pack.int_types.dht_upload_rate_limit.swigValue(), 64_000)
         // Connect to more peers right after adding, so the first pieces arrive sooner.
         sp.setInteger(settings_pack.int_types.torrent_connect_boost.swigValue(), 60)
         sp.setInteger(settings_pack.int_types.connection_speed.swigValue(), 60)
@@ -60,10 +119,95 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         sp.setBoolean(settings_pack.bool_types.announce_to_all_trackers.swigValue(), true)
         sp.setBoolean(settings_pack.bool_types.announce_to_all_tiers.swigValue(), true)
         
+        // Network-level outcomes; without them a magnet that never gets peers says nothing.
+        sm.addListener(object : AlertListener {
+            override fun types(): IntArray? = null
+            override fun alert(alert: Alert<*>) {
+                when (alert) {
+                    is ListenSucceededAlert, is ListenFailedAlert, is UdpErrorAlert, is DhtErrorAlert,
+                    is DhtBootstrapAlert, is TrackerErrorAlert, is TrackerReplyAlert ->
+                        VegaLog.d(TAG, "Session ${alert.type()}: ${alert.message()}")
+                }
+            }
+        })
         sm.start(SessionParams(sp))
+        sessionStartedAt = System.currentTimeMillis()
         sessionManager = sm
         VegaLog.d(TAG, "SessionManager started, running=${sm.isRunning}")
+        ensureWatchdog()
         return sm
+    }
+
+    // Auto-managed torrents beyond active_downloads stay paused in libtorrent's queue
+    // with no error: a stream looked hung at 0 B/s until the source was opened again.
+    private fun takeControl(th: TorrentHandle?) {
+        if (th == null || !th.isValid) return
+        try {
+            th.unsetFlags(TorrentFlags.AUTO_MANAGED)
+            th.resume()
+        } catch (_: Exception) {}
+    }
+
+    private fun ensureWatchdog() {
+        if (watchdog != null) return
+        val executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { task ->
+            Thread(task, "TorrentWatchdog").apply { isDaemon = true }
+        }
+        executor.scheduleWithFixedDelay({
+            try { checkStreams() } catch (e: Throwable) { VegaLog.w(TAG, "Watchdog failed: ${e.message}") }
+        }, WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, TimeUnit.MILLISECONDS)
+        watchdog = executor
+    }
+
+    // Progress is payload bytes received, not verified pieces: a 16 MB piece can take
+    // a minute on a slow swarm while data keeps arriving.
+    private fun checkStreams() {
+        val sm = sessionManager ?: return
+        if (!sm.isRunning) return
+        val now = System.currentTimeMillis()
+        for ((hash, h) in health) {
+            val th = try { sm.find(Sha1Hash.parseHex(hash)) } catch (_: Exception) { null }
+            if (th == null || !th.isValid) continue
+            val st = try { th.status() } catch (_: Exception) { continue }
+            val received = st.totalPayloadDownload()
+            val idle = st.hasMetadata() && (st.isFinished || st.isSeeding)
+            if (received > h.received || idle) {
+                h.received = received
+                h.lastProgressAt = now
+                h.action = ""
+                continue
+            }
+            // Pausing a torrent restarts its session counters.
+            if (received < h.received) h.received = received
+            val stalled = now - h.lastProgressAt
+            val reconnect = stalled >= STALL_RECONNECT_MS && now - h.lastReconnectAt >= RECONNECT_GAP_MS
+            val reannounce = stalled >= STALL_REANNOUNCE_MS && now - h.lastReannounceAt >= REANNOUNCE_GAP_MS
+            if (!reconnect && !reannounce) continue
+            h.recoveries++
+            h.lastReannounceAt = now
+            VegaLog.w(TAG, "Stream $hash: no data for ${stalled / 1000}s (metadata=${st.hasMetadata()} " +
+                "peers=${st.numPeers()} seeds=${st.numSeeds()} known=${st.listPeers()} " +
+                "candidates=${st.connectCandidates()} dht=${sm.dhtNodes()}): " +
+                if (reconnect) "reconnecting" else "re-announcing")
+            try {
+                if (reconnect) {
+                    h.lastReconnectAt = now
+                    h.action = "reconnecting"
+                    // A network change leaves the listen and DHT sockets dead.
+                    if (sm.dhtNodes() == 0L) sm.reopenNetworkSockets()
+                    th.pause()
+                    th.resume()
+                } else {
+                    h.action = "searching"
+                }
+                th.unsetFlags(TorrentFlags.AUTO_MANAGED)
+                th.resume()
+                th.forceReannounce(0, -1, TorrentHandle.IGNORE_MIN_INTERVAL)
+                th.forceDHTAnnounce()
+            } catch (e: Exception) {
+                VegaLog.w(TAG, "Recovery of $hash failed: ${e.message}")
+            }
+        }
     }
 
     private fun ensureServer(): TorrentStreamServer {
@@ -118,6 +262,16 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                     ?: (reactApplicationContext.filesDir.absolutePath + "/torrents")
                 File(downloadDir).mkdirs()
 
+                // A release under a swarm test is the player's now; the test must not remove it.
+                if (expectedHash != null && testing.containsKey(expectedHash)) claimed.add(expectedHash)
+                if (expectedHash != null && removing.remove(expectedHash) != null) {
+                    var waits = 0
+                    while (waits < 50 && sm.find(Sha1Hash.parseHex(expectedHash))?.isValid == true) {
+                        Thread.sleep(100)
+                        waits++
+                    }
+                }
+
                 // Check both our Map and the actual C++ session manager
                 var existing = if (expectedHash != null) torrentHandles[expectedHash] else null
                 if (existing == null && expectedHash != null) {
@@ -129,6 +283,16 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 }
 
                 if (existing != null && existing.isValid) {
+                    takeControl(existing)
+                    // A swarm test let only the first megabytes download; the player
+                    // needs the whole file (prepareVideoFile picks the episode).
+                    if (expectedHash != null && expectedHash in claimed) {
+                        try {
+                            existing.torrentFile()?.let { ti ->
+                                existing.prioritizePieces(Priority.array(Priority.DEFAULT, ti.numPieces()))
+                            }
+                        } catch (_: Exception) {}
+                    }
                     try {
                         if (existing.status().hasMetadata()) {
                             server.registerTorrent(expectedHash!!, File(downloadDir))
@@ -160,7 +324,12 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                                 VegaLog.d(TAG, "Alert: AddTorrentAlert for $alertHash")
 
                                 try {
-                                    torrentHandles[alertHash] = th
+                                    // alert.handle() points into alert storage that libtorrent recycles,
+                                    // so only the session's own copy may outlive this callback.
+                                    sm.find(Sha1Hash.parseHex(alertHash))?.let {
+                                        torrentHandles[alertHash] = it
+                                        takeControl(it)
+                                    }
                                     torrentSavePaths[alertHash] = downloadDir
                                     if (th.status().hasMetadata()) {
                                         metadataLatch.countDown()
@@ -197,6 +366,7 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 }
 
                 sm.addListener(listener)
+                if (expectedHash != null) health.putIfAbsent(expectedHash, StreamHealth())
 
                 VegaLog.d(TAG, "Starting download: $magnetOrUrl -> $downloadDir")
                 if (magnetOrUrl.startsWith("magnet:") ||
@@ -208,9 +378,23 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                     val ti = TorrentInfo(File(magnetOrUrl))
                     sm.download(ti, File(downloadDir))
                 }
+                // download() ignores a torrent kept from an earlier attempt, so no add alert
+                // follows; its metadata may also have arrived before the listener.
+                val added = expectedHash?.let { sm.find(Sha1Hash.parseHex(it)) }
+                takeControl(added)
+                if (added?.status()?.hasMetadata() == true) {
+                    metadataLatch.countDown()
+                }
 
-                VegaLog.d(TAG, "Waiting for metadata (45s timeout)...")
-                val gotMetadata = metadataLatch.await(45, TimeUnit.SECONDS)
+                VegaLog.d(TAG, "Waiting for metadata (${METADATA_TIMEOUT_SECONDS}s timeout)...")
+                var gotMetadata = false
+                for (waited in 5..METADATA_TIMEOUT_SECONDS step 5) {
+                    if (metadataLatch.await(5, TimeUnit.SECONDS)) {
+                        gotMetadata = true
+                        break
+                    }
+                    logMetadataWait(sm, expectedHash, waited)
+                }
                 VegaLog.d(TAG, "Metadata wait done: gotMetadata=$gotMetadata, addError=$addError")
                 sm.removeListener(listener)
 
@@ -220,7 +404,22 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 }
 
                 if (!gotMetadata) {
-                    promise.reject("TIMEOUT", "Timed out waiting for torrent metadata")
+                    // A torrent left behind would hold connections and come back
+                    // half-initialised on the next attempt.
+                    val stale = expectedHash?.let { sm.find(Sha1Hash.parseHex(it)) }
+                    // Peers trackers or the DHT named, connected or not.
+                    val known = try { stale?.status()?.let { maxOf(it.listPeers(), it.numPeers()) } ?: 0 } catch (_: Exception) { 0 }
+                    if (stale != null) try { sm.remove(stale) } catch (_: Exception) {}
+                    expectedHash?.let {
+                        health.remove(it)
+                        torrentHandles.remove(it)
+                        torrentSavePaths.remove(it)
+                    }
+                    if (known == 0) {
+                        promise.reject("NO_PEERS", "No peers found for this torrent in $METADATA_TIMEOUT_SECONDS s")
+                    } else {
+                        promise.reject("TIMEOUT", "$known peers were found but did not send the torrent info in $METADATA_TIMEOUT_SECONDS s")
+                    }
                     return@Thread
                 }
 
@@ -280,6 +479,60 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         }.start()
     }
 
+    /**
+     * Peers the DHT knows for each info hash, to drop dead releases from a source
+     * list before one is picked. Resolves {peers: {hash: count}, nodes}.
+     */
+    @ReactMethod
+    fun probeSwarms(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            try {
+                val sm = ensureSession()
+                val wanted = (0 until hashes.size())
+                    .mapNotNull { hashes.getString(it)?.lowercase() }
+                    .filter { it.matches(Regex("[0-9a-f]{40}")) }
+                    .distinct()
+                val found = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+                val listener = object : AlertListener {
+                    override fun types(): IntArray = intArrayOf(AlertType.DHT_GET_PEERS_REPLY.swig())
+                    override fun alert(alert: Alert<*>) {
+                        if (alert !is DhtGetPeersReplyAlert) return
+                        val hash = try { alert.infoHash().toHex() } catch (_: Exception) { return }
+                        val peers = found.getOrPut(hash) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+                        try { alert.peers().forEach { peers.add(it.toString()) } } catch (_: Exception) {}
+                    }
+                }
+                // A freshly started session has no DHT routing table yet.
+                val sessionAge = System.currentTimeMillis() - sessionStartedAt
+                if (sessionAge < PROBE_BOOTSTRAP_MS) Thread.sleep(PROBE_BOOTSTRAP_MS - sessionAge)
+                sm.addListener(listener)
+                try {
+                    for (round in 0 until PROBE_ROUNDS) {
+                        for (hash in wanted) {
+                            if (found[hash].isNullOrEmpty()) {
+                                try { sm.swig().dht_get_peers(Sha1Hash.parseHex(hash).swig()) } catch (_: Exception) {}
+                            }
+                        }
+                        Thread.sleep(PROBE_ROUND_MS)
+                        if (wanted.all { !found[it].isNullOrEmpty() }) break
+                    }
+                } finally {
+                    sm.removeListener(listener)
+                }
+                val peers = WritableNativeMap()
+                for (hash in wanted) peers.putInt(hash, found[hash]?.size ?: 0)
+                val alive = wanted.count { !found[it].isNullOrEmpty() }
+                VegaLog.d(TAG, "Swarm probe: $alive/${wanted.size} releases have DHT peers (dht nodes ${sm.dhtNodes()})")
+                promise.resolve(WritableNativeMap().apply {
+                    putMap("peers", peers)
+                    putDouble("nodes", sm.dhtNodes().toDouble())
+                })
+            } catch (e: Exception) {
+                promise.reject("PROBE_ERROR", e.message, e)
+            }
+        }.start()
+    }
+
     @ReactMethod
     fun getStats(infoHash: String, promise: Promise) {
         try {
@@ -304,6 +557,16 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 putDouble("totalDone", status.totalDone().toDouble())
                 putDouble("totalWanted", status.totalWanted().toDouble())
                 putBoolean("hasMetadata", status.hasMetadata())
+                putInt("numConnections", status.numConnections())
+                putInt("knownPeers", status.listPeers())
+                putInt("knownSeeds", status.listSeeds())
+                putDouble("dhtNodes", (sessionManager?.dhtNodes() ?: 0L).toDouble())
+                val h = health[infoHash]
+                if (h != null) {
+                    putDouble("stalledMs", (System.currentTimeMillis() - h.lastProgressAt).toDouble())
+                    putInt("recoveries", h.recoveries)
+                    putString("recovery", h.action)
+                }
             }
             promise.resolve(result)
         } catch (e: Exception) {
@@ -389,6 +652,15 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
                 }
                 filePriorities[fileIndex] = Priority.DEFAULT
                 applyFilePriorities(th, filePriorities)
+                if (fullDownload) {
+                    // Unchanged file priorities leave piece priorities as they were,
+                    // such as a swarm test's "first megabytes only": the whole file
+                    // must download.
+                    val lastPiece = ((fileOffset + fileSize - 1L) / pieceLength).toInt()
+                    for (pieceIndex in startPiece..lastPiece) {
+                        if (th.piecePriority(pieceIndex) == Priority.IGNORE) th.piecePriority(pieceIndex, Priority.DEFAULT)
+                    }
+                }
                 if (!fullDownload) {
                     // Only the pieces marked below and by the stream server download.
                     th.prioritizePieces(Priority.array(Priority.IGNORE, ti.numPieces()))
@@ -549,52 +821,315 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
     fun deleteTorrent(infoHash: String, deleteFiles: Boolean, promise: Promise) {
         VegaLog.e(TAG, "deleteTorrent called for infoHash: $infoHash, deleteFiles: $deleteFiles")
         try {
-            val sm = ensureSession()
-            val th = try { sm.find(Sha1Hash.parseHex(infoHash)) } catch(e: Exception) { null }
-            
-            val pathsToDelete = mutableListOf<String>()
-            val savePath = torrentSavePaths[infoHash]
-            torrentOutputPaths[infoHash]?.let { pathsToDelete.add(it) }
-            if (deleteFiles && th != null && savePath != null) {
-                try {
-                    val ti = th.torrentFile()
-                    if (ti != null) {
-                        val fs = ti.files()
-                        for (i in 0 until fs.numFiles()) {
-                            // If we renamed the file, we can't easily query th for the new name without extra bindings.
-                            // But libtorrent's session remove(th) might not delete files.
-                            // We will delete the original file paths.
-                            pathsToDelete.add(File(savePath, fs.filePath(i)).absolutePath)
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-            
-            if (th != null && sm != null) {
-                try { th.pause() } catch (_: Exception) {}
-                try { sm.remove(th) } catch (_: Exception) {}
-            }
-            
-            streamServer?.unregisterTorrent(infoHash)
-            torrentHandles.remove(infoHash)
-            torrentSavePaths.remove(infoHash)
-            torrentOutputPaths.remove(infoHash)
-
-            for (path in pathsToDelete) {
-                try { 
-                    val f = File(path)
-                    f.delete()
-                    // Delete parent dir if it's empty and not the root savePath
-                    val parent = f.parentFile
-                    if (parent != null && parent.absolutePath != savePath && parent.list()?.isEmpty() == true) {
-                        parent.delete()
-                    }
-                } catch (_: Exception) {}
-            }
-
+            removeTorrent(infoHash, deleteFiles)
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("DELETE_ERROR", e.message, e)
+        }
+    }
+
+    private fun removeTorrent(infoHash: String, deleteFiles: Boolean) {
+        val sm = ensureSession()
+        val th = try { sm.find(Sha1Hash.parseHex(infoHash)) } catch(e: Exception) { null }
+
+        val pathsToDelete = mutableListOf<String>()
+        val savePath = torrentSavePaths[infoHash]
+        torrentOutputPaths[infoHash]?.let { pathsToDelete.add(it) }
+        if (deleteFiles && th != null && savePath != null) {
+            try {
+                val ti = th.torrentFile()
+                if (ti != null) {
+                    val fs = ti.files()
+                    for (i in 0 until fs.numFiles()) {
+                        // libtorrent's remove does not delete files, so the original paths are.
+                        pathsToDelete.add(File(savePath, fs.filePath(i)).absolutePath)
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (th != null) {
+            removing[infoHash] = System.currentTimeMillis()
+            try { th.pause() } catch (_: Exception) {}
+            try { sm.remove(th) } catch (_: Exception) {}
+        }
+
+        streamServer?.unregisterTorrent(infoHash)
+        health.remove(infoHash)
+        claimed.remove(infoHash)
+        torrentHandles.remove(infoHash)
+        torrentSavePaths.remove(infoHash)
+        torrentOutputPaths.remove(infoHash)
+
+        for (path in pathsToDelete) {
+            try {
+                val f = File(path)
+                f.delete()
+                // Delete parent dir if it's empty and not the root savePath
+                val parent = f.parentFile
+                if (parent != null && parent.absolutePath != savePath && parent.list()?.isEmpty() == true) {
+                    parent.delete()
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** What the monitor has seen of a release since it was added. */
+    private class MonitorSample(val addedAt: Long, val owned: Boolean) {
+        var prepared = false
+        var metadataAt = -1L
+        var bytesAtMetadata = 0L
+        var bytes = 0L
+        var maxRate = 0
+        var maxPeers = 0
+        var maxSeeds = 0
+        var known = 0
+        val peerList = LinkedHashSet<String>()
+    }
+
+    /**
+     * Starts measuring releases while a source list is open: each one not already
+     * in the session is added and downloads the start of its main video. Nothing
+     * is decided here; swarmStats reports how each is doing, as often as asked,
+     * and stopSwarmMonitor ends it.
+     */
+    @ReactMethod
+    fun monitorSwarms(magnets: ReadableArray, promise: Promise) {
+        Thread {
+            try {
+                val sm = ensureSession()
+                val dir = reactApplicationContext.filesDir.absolutePath + "/torrents"
+                File(dir).mkdirs()
+                for (i in 0 until magnets.size()) {
+                    val magnet = magnets.getString(i) ?: continue
+                    val hash = Regex("btih:([a-fA-F0-9]{40})", RegexOption.IGNORE_CASE)
+                        .find(magnet)?.groupValues?.get(1)?.lowercase() ?: continue
+                    if (monitored.containsKey(hash)) continue
+                    // A release already in the session (playing) is measured as it is.
+                    val present = sm.find(Sha1Hash.parseHex(hash))?.isValid == true
+                    if (!present) {
+                        testing[hash] = System.currentTimeMillis()
+                        torrentSavePaths[hash] = dir
+                        sm.download(withPublicTrackers(magnet), File(dir), TorrentFlags.AUTO_MANAGED)
+                        takeControl(sm.find(Sha1Hash.parseHex(hash)))
+                    }
+                    monitored[hash] = MonitorSample(System.currentTimeMillis(), !present)
+                }
+                promise.resolve(null)
+            } catch (e: Throwable) {
+                VegaLog.w(TAG, "Swarm monitor could not start: ${e.message}")
+                try { promise.reject("MONITOR_ERROR", e.message, e) } catch (_: Throwable) {}
+            }
+        }.start()
+    }
+
+    /**
+     * How each monitored release is doing: {hash: {metadata, elapsedMs, dataMs,
+     * bytes, rate, maxRate, peers, seeds, maxPeers, maxSeeds, known, done,
+     * peerList}}. bytes and dataMs count from the moment the torrent info arrived.
+     */
+    @ReactMethod
+    fun swarmStats(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            try {
+                val sm = sessionManager
+                val result = WritableNativeMap()
+                val now = System.currentTimeMillis()
+                for (i in 0 until hashes.size()) {
+                    val hash = hashes.getString(i)?.lowercase() ?: continue
+                    val sample = monitored[hash] ?: continue
+                    var peersNow = 0
+                    var seedsNow = 0
+                    var rate = 0
+                    val th = try { sm?.find(Sha1Hash.parseHex(hash))?.takeIf { it.isValid } } catch (_: Exception) { null }
+                    if (th != null) {
+                        try {
+                            val st = th.status()
+                            sample.known = maxOf(sample.known, st.listPeers())
+                            if (st.hasMetadata()) {
+                                if (sample.metadataAt < 0) {
+                                    sample.metadataAt = now
+                                    sample.bytesAtMetadata = st.totalPayloadDownload()
+                                }
+                                if (sample.owned && !sample.prepared && hash !in claimed) {
+                                    sample.prepared = true
+                                    prioritizeTestPieces(th)
+                                }
+                                sample.bytes = (st.totalPayloadDownload() - sample.bytesAtMetadata).coerceAtLeast(0L)
+                                rate = st.downloadPayloadRate()
+                                sample.maxRate = maxOf(sample.maxRate, rate)
+                            }
+                            val peers = th.peerInfo()
+                            peersNow = peers.size
+                            seedsNow = peers.count { it.progress() >= 0.999f }
+                            sample.maxPeers = maxOf(sample.maxPeers, peersNow)
+                            sample.maxSeeds = maxOf(sample.maxSeeds, seedsNow)
+                            for (peer in peers) {
+                                // "tcp://1.2.3.4:6881" -> "1.2.3.4:6881", the form a magnet's x.pe takes.
+                                if (sample.peerList.size < 40) sample.peerList.add(peer.ip().substringAfter("://"))
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    result.putMap(hash, WritableNativeMap().apply {
+                        putBoolean("metadata", sample.metadataAt >= 0)
+                        putDouble("elapsedMs", (now - sample.addedAt).toDouble())
+                        putDouble("dataMs", if (sample.metadataAt >= 0) (now - sample.metadataAt).toDouble() else 0.0)
+                        putDouble("bytes", sample.bytes.toDouble())
+                        putDouble("rate", rate.toDouble())
+                        putDouble("maxRate", sample.maxRate.toDouble())
+                        putInt("peers", peersNow)
+                        putInt("seeds", seedsNow)
+                        putInt("maxPeers", sample.maxPeers)
+                        putInt("maxSeeds", sample.maxSeeds)
+                        putInt("known", sample.known)
+                        // The start of the video is in: enough to tell the speed.
+                        putBoolean("done", sample.bytes >= TEST_BYTES * 95 / 100)
+                        putArray("peerList", WritableNativeArray().apply { sample.peerList.forEach { pushString(it) } })
+                    })
+                }
+                promise.resolve(result)
+            } catch (e: Throwable) {
+                try { promise.reject("MONITOR_ERROR", e.message, e) } catch (_: Throwable) {}
+            }
+        }.start()
+    }
+
+    /**
+     * Ends measuring these releases. The ones the monitor added go, with what
+     * they downloaded, unless the player took them over.
+     */
+    @ReactMethod
+    fun stopSwarmMonitor(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            for (i in 0 until hashes.size()) {
+                val hash = hashes.getString(i)?.lowercase() ?: continue
+                val sample = monitored.remove(hash) ?: continue
+                testing.remove(hash)
+                if (sample.owned && hash !in claimed) {
+                    try { removeTorrent(hash, true) } catch (_: Exception) {}
+                }
+            }
+            try { promise.resolve(null) } catch (_: Throwable) {}
+        }.start()
+    }
+
+    /**
+     * Live seeders and leechers of releases from public trackers (UDP scrape,
+     * up to 70 releases per packet): {hash: {seeders, leechers, trackers}}.
+     * Index snapshots are often months old.
+     */
+    @ReactMethod
+    fun scrapeSwarms(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            try {
+                val list = (0 until hashes.size()).mapNotNull { hashes.getString(it)?.lowercase() }
+                    .filter { it.length == 40 }.distinct()
+                val best = java.util.concurrent.ConcurrentHashMap<String, IntArray>()
+                val threads = SCRAPE_TRACKERS.map { (host, port) ->
+                    Thread {
+                        for ((hash, counts) in scrapeTracker(host, port, list)) {
+                            best.merge(hash, intArrayOf(counts[0], counts[1], 1)) { a, b ->
+                                intArrayOf(maxOf(a[0], b[0]), maxOf(a[1], b[1]), a[2] + b[2])
+                            }
+                        }
+                    }.also { it.start() }
+                }
+                threads.forEach { it.join(9000) }
+                val result = WritableNativeMap()
+                for ((hash, counts) in best) {
+                    result.putMap(hash, WritableNativeMap().apply {
+                        putInt("seeders", counts[0])
+                        putInt("leechers", counts[1])
+                        putInt("trackers", counts[2])
+                    })
+                }
+                promise.resolve(result)
+            } catch (e: Throwable) {
+                try { promise.reject("SCRAPE_ERROR", e.message, e) } catch (_: Throwable) {}
+            }
+        }.start()
+    }
+
+    // One tracker: connect, then scrape the hashes in packets of 70 (BEP 15).
+    private fun scrapeTracker(host: String, port: Int, hashes: List<String>): Map<String, IntArray> {
+        val out = HashMap<String, IntArray>()
+        try {
+            java.net.DatagramSocket().use { socket ->
+                socket.soTimeout = 2500
+                val address = java.net.InetAddress.getByName(host)
+                fun exchange(request: ByteArray): ByteArray {
+                    socket.send(java.net.DatagramPacket(request, request.size, address, port))
+                    val buffer = ByteArray(2048)
+                    val packet = java.net.DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    return buffer.copyOf(packet.length)
+                }
+                var transaction = (System.nanoTime() and 0x7fffffffL).toInt()
+                val connect = java.nio.ByteBuffer.allocate(16).putLong(0x41727101980L).putInt(0).putInt(transaction).array()
+                val reply = java.nio.ByteBuffer.wrap(exchange(connect))
+                if (reply.limit() < 16 || reply.getInt(0) != 0 || reply.getInt(4) != transaction) return out
+                val connection = reply.getLong(8)
+                for (chunk in hashes.chunked(70)) {
+                    transaction++
+                    val request = java.nio.ByteBuffer.allocate(16 + 20 * chunk.size)
+                        .putLong(connection).putInt(2).putInt(transaction)
+                    for (hash in chunk) {
+                        request.put(ByteArray(20) { i -> hash.substring(2 * i, 2 * i + 2).toInt(16).toByte() })
+                    }
+                    val answer = java.nio.ByteBuffer.wrap(exchange(request.array()))
+                    if (answer.limit() < 8 || answer.getInt(0) != 2 || answer.getInt(4) != transaction) break
+                    chunk.forEachIndexed { i, hash ->
+                        val at = 8 + i * 12
+                        if (at + 12 <= answer.limit()) out[hash] = intArrayOf(answer.getInt(at), answer.getInt(at + 8))
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return out
+    }
+
+    /** The viewer picked a tested release: keep it running for the player. */
+    @ReactMethod
+    fun claimSwarmTest(infoHash: String, promise: Promise) {
+        val hash = infoHash.lowercase()
+        if (testing.containsKey(hash)) claimed.add(hash)
+        promise.resolve(null)
+    }
+
+    // Only the start of the largest video downloads during a test: enough to measure
+    // speed, and what the player reads first if the viewer picks this release.
+    private fun prioritizeTestPieces(th: TorrentHandle) {
+        try {
+            val ti = th.torrentFile() ?: return
+            val fs = ti.files()
+            var index = 0
+            var largest = -1L
+            for (i in 0 until fs.numFiles()) {
+                if (fs.fileSize(i) > largest) {
+                    largest = fs.fileSize(i)
+                    index = i
+                }
+            }
+            val pieceLength = ti.pieceLength().toLong()
+            val first = (fs.fileOffset(index) / pieceLength).toInt()
+            val count = maxOf(2L, (TEST_BYTES + pieceLength - 1) / pieceLength).toInt()
+            val last = minOf(ti.numPieces() - 1, first + count - 1)
+            th.prioritizePieces(Priority.array(Priority.IGNORE, ti.numPieces()))
+            for (piece in first..last) th.piecePriority(piece, Priority.TOP_PRIORITY)
+        } catch (e: Exception) {
+            VegaLog.w(TAG, "Swarm test priorities failed: ${e.message}")
+        }
+    }
+
+    // Shows why a magnet gets no metadata: no DHT, no peers found, or queued.
+    private fun logMetadataWait(sm: SessionManager, hash: String?, waitedSeconds: Int) {
+        try {
+            val st = hash?.let { sm.find(Sha1Hash.parseHex(it)) }?.status()
+            VegaLog.d(TAG, "Metadata wait ${waitedSeconds}s: state=${st?.state()} peers=${st?.numPeers()} " +
+                "connections=${st?.numConnections()} known=${st?.listPeers()} queue=${st?.queuePosition()} " +
+                "dhtNodes=${sm.dhtNodes()} torrents=${sm.swig().get_torrents().size} sessionPaused=${sm.isPaused}")
+        } catch (e: Exception) {
+            VegaLog.d(TAG, "Metadata wait ${waitedSeconds}s: status unavailable (${e.message})")
         }
     }
 
@@ -643,4 +1178,13 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
             else -> "unknown"
         }
     }
+}
+
+private class StreamHealth {
+    @Volatile var received = 0L
+    @Volatile var lastProgressAt = System.currentTimeMillis()
+    @Volatile var lastReannounceAt = 0L
+    @Volatile var lastReconnectAt = 0L
+    @Volatile var recoveries = 0
+    @Volatile var action = ""
 }

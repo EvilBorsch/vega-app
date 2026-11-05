@@ -1,5 +1,8 @@
 import {findSavedSubtitle, savedSubtitleLabel} from '../../lib/subtitles/savedSubtitles';
 import RemovableSubtitleRow from '../../components/RemovableSubtitleRow';
+import MovieServerDialog from '../../components/MovieServerDialog';
+import {TorrentFailurePanel, TorrentStallActions, TorrentStatusText} from '../../components/TorrentStatusView';
+import ElapsedSeconds from '../../components/ElapsedSeconds';
 import {getPlaybackQuality} from '../../lib/player/playbackQuality';
 import {localContentId} from '../../lib/localContent/library';
 import useLocalContentStore from '../../lib/zustand/localContentStore';
@@ -47,12 +50,8 @@ import {
   cacheStorage,
   settingsStorage,
 } from '../../lib/storage';
-import Orientation, {
-  OrientationLocker,
-  PORTRAIT,
-  LANDSCAPE,
-} from 'react-native-orientation-locker';
 import {SystemBars} from 'react-native-edge-to-edge';
+import {playerOrientation} from '../../lib/player/playerOrientation';
 import VideoPlayer from '../../components/media-console';
 import {playPauseRef} from '../../components/media-console/components/PlayPause/PlayPause';
 import {Back} from '../../components/media-console/components/Back';
@@ -84,18 +83,35 @@ import {
 import {useStreamTrackSelections} from '../../lib/hooks/useStreamTrackSelections';
 import {useStreamResumePosition} from '../../lib/hooks/useStreamResumePosition';
 import {getNextEpisode, isWatched} from '../../lib/player/upNext';
+import {isRemoteSourceReady} from '../../lib/player/remoteSourceReady';
+import {episodeTargetFromLink, pickVideoFileIndex} from '../../lib/player/episodeFile';
 import {
   usePlayerProgress,
   usePlayerSettings,
 } from '../../lib/hooks/usePlayerSettings';
 import * as NavigationBar from 'expo-navigation-bar';
 import {StatusBar} from 'react-native';
-import {torrentManager} from '../../lib/torrentManager';
+import {normalizeMagnetLink, torrentManager} from '../../lib/torrentManager';
 import {
   isDummyTorrentLink,
   isTorrentStream,
   resolveTorrentStream,
 } from '../../lib/torrentStream';
+import {freshResult, useSwarmTestStore, withKnownPeers} from '../../lib/player/swarmTests';
+import {
+  MAX_TORRENT_PLAYER_RELOADS,
+  MAX_TORRENT_RESTARTS,
+  PLAYBACK_STALL_PROMPT_MS,
+  STARTUP_STALL_RESTART_MS,
+  DEAD_RELEASE_ATTEMPTS,
+  describeTorrentStatus,
+  isNoPeersError,
+  shouldRestartStalledTorrent,
+  sourceSearchText,
+  torrentFailureMessage,
+  torrentInfoHash,
+  type StreamTorrentStats,
+} from '../../lib/player/torrentStatus';
 import {syncFromSharedFolder} from '../../lib/sync/syncService';
 import {useM3Colors} from '../../theme/M3PaletteContext';
 import {useTVFocusBorderColor} from '../../lib/tv/useTVFocusBorderColor';
@@ -868,6 +884,7 @@ const Player = ({route}: Props): React.JSX.Element => {
     streamData,
     selectedStream,
     setSelectedStream,
+    requiresServerSelection,
     externalSubs,
     savedSubtitles,
     saveSubtitle,
@@ -876,6 +893,10 @@ const Player = ({route}: Props): React.JSX.Element => {
     error: streamError,
     refreshLinks,
     switchToNextStream,
+    refetch: refetchStreams,
+    hiddenStreams,
+    checkingSwarms,
+    markReleaseDead,
   } = useStream({
     activeEpisode,
     routeParams: route.params,
@@ -1547,6 +1568,10 @@ const Player = ({route}: Props): React.JSX.Element => {
   const [processedStreamUrl, setProcessedStreamUrl] = useState<string>(() =>
     isTorrentStream(selectedStream) ? '' : selectedStream.link,
   );
+  // Stream link that processedStreamUrl was resolved for.
+  const processedForLinkRef = useRef(
+    isTorrentStream(selectedStream) ? '' : selectedStream.link,
+  );
   // Resume point handed to the player with a torrent source, fixed per stream so
   // progress updates never reload it. Starting there skips buffering the opening
   // seconds, which on a torrent means downloading pieces that are then skipped.
@@ -1576,54 +1601,50 @@ const Player = ({route}: Props): React.JSX.Element => {
   const isRemoteActiveRef = useRef(isRemoteActive);
   isRemoteActiveRef.current = isRemoteActive;
 
+  // One place decides the orientation: the screen option react-native-screens
+  // applies while the player is on top, and drops when it leaves. Three
+  // mechanisms used to fight (this option, imperative locks and
+  // OrientationLocker): the source list stayed landscape however the phone was
+  // turned, the app stayed locked to portrait after playback, and a window
+  // rotated under a stale layout drew the video in a corner.
+  const choosingSource = requiresServerSelection && localDecision === 'online';
+  const screenOrientation = playerOrientation({isTV: Platform.isTV, isRemoteActive, choosingSource});
   useEffect(() => {
     if (Platform.isTV) return;
     (navigation as any).setOptions({
-      orientation: isRemoteActive ? 'portrait' : 'landscape',
+      orientation: screenOrientation,
       statusBarHidden: !isRemoteActive,
       navigationBarHidden: !isRemoteActive,
       autoHideHomeIndicator: !isRemoteActive,
     });
-    if (isRemoteActive) {
-      Orientation.lockToPortrait();
-      exitFullScreen();
-    } else {
-      Orientation.lockToLandscape();
-      goFullScreen();
-    }
-  }, [isRemoteActive, navigation]);
+  }, [screenOrientation, isRemoteActive, navigation]);
+  useEffect(() => {
+    if (isRemoteActive) exitFullScreen();
+    else goFullScreen();
+  }, [isRemoteActive]);
   const [isResolvingStream, setIsResolvingStream] = useState(false);
   const progressIntervalRef = useRef<any>(null);
   const [torrentState, setTorrentState] = useState<string>('');
   const [torrentDownloaded, setTorrentDownloaded] = useState<number>(0);
   const [torrentDownloadSpeed, setTorrentDownloadSpeed] = useState<number>(0);
+  // Full native stats and the watchdog's stall info, shown while a torrent starts.
+  const [torrentStats, setTorrentStats] = useState<StreamTorrentStats | null>(null);
+  const [torrentStartedAt, setTorrentStartedAt] = useState(0);
+  // Why the selected torrent could not start; shown instead of a spinner.
+  const [torrentFailure, setTorrentFailure] = useState<string | null>(null);
+  // Bumped to add the selected torrent again, as re-opening the source did by hand.
+  const [torrentAttempt, setTorrentAttempt] = useState(0);
+  // Automatic re-adds and player reloads already spent on the selected source.
+  const torrentRetriesRef = useRef({link: '', restarts: 0, reloads: 0, noPeers: 0});
+  const [videoReady, setVideoReady] = useState(false);
+  const [isVideoBuffering, setIsVideoBuffering] = useState(false);
+  const [playerReloadKey, setPlayerReloadKey] = useState(0);
   const findVideoFileIndex = async (infoHash: string): Promise<number> => {
     const files = await torrentManager.getFiles(infoHash);
     if (!files || files.length === 0) {
       throw new Error('No files found in torrent');
     }
-
-    const videoExts = [
-      '.mp4',
-      '.mkv',
-      '.avi',
-      '.webm',
-      '.mov',
-      '.ts',
-      '.flv',
-      '.wmv',
-      '.m4v',
-    ];
-    let bestIndex = 0;
-    let bestSize = 0;
-    for (const f of files) {
-      const name = f.name.toLowerCase();
-      if (videoExts.some(ext => name.endsWith(ext)) && f.size > bestSize) {
-        bestIndex = f.index;
-        bestSize = f.size;
-      }
-    }
-    return bestIndex;
+    return pickVideoFileIndex(files, episodeTargetFromLink(activeEpisode?.link));
   };
 
   const activeTorrentRef = useRef<string | null>(null);
@@ -1671,6 +1692,9 @@ const Player = ({route}: Props): React.JSX.Element => {
   // Handle torrent proxy resolution
   useEffect(() => {
     let isMounted = true;
+    if (torrentRetriesRef.current.link !== (selectedStream?.link || '')) {
+      torrentRetriesRef.current = {link: selectedStream?.link || '', restarts: 0, reloads: 0, noPeers: 0};
+    }
 
     const cleanupPreviousTorrent = async () => {
       const prevHash = activeTorrentRef.current;
@@ -1680,6 +1704,58 @@ const Player = ({route}: Props): React.JSX.Element => {
           await torrentManager.deleteTorrent(prevHash, true);
         } catch {}
       }
+    };
+
+    const pollStats = (infoHash: string) => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+      }
+      progressIntervalRef.current = setInterval(async () => {
+        try {
+          const stats: StreamTorrentStats = await torrentManager.getStats(infoHash);
+          if (isMounted) {
+            setTorrentStats(stats);
+            setTorrentState(stats.state || '');
+            setTorrentDownloaded((stats.totalDone || 0) / 1024 / 1024);
+            setTorrentDownloadSpeed(stats.downloadRate || 0);
+          }
+        } catch {}
+      }, 1000);
+    };
+
+    // A failed start is retried automatically (as re-opening the source did),
+    // then explained with a way out instead of an endless spinner.
+    const handleTorrentFailure = (error: unknown, infoHash?: string) => {
+      const retries = torrentRetriesRef.current;
+      const reason = torrentFailureMessage(error);
+      // Nobody at all shares the release (twice, so a cold DHT is not mistaken
+      // for a dead swarm): drop it from the list and offer the others.
+      if (isNoPeersError(error)) {
+        retries.noPeers++;
+        if (retries.noPeers >= DEAD_RELEASE_ATTEMPTS && infoHash) {
+          markReleaseDead(infoHash);
+          ToastAndroid.show('Nobody is sharing this release. It was removed from the list.', ToastAndroid.LONG);
+          if (!switchToNextStream()) setTorrentFailure(reason);
+          return;
+        }
+      }
+      if (retries.restarts < MAX_TORRENT_RESTARTS) {
+        retries.restarts++;
+        ToastAndroid.show(
+          `${reason} Trying again (${retries.restarts}/${MAX_TORRENT_RESTARTS})…`,
+          ToastAndroid.LONG,
+        );
+        setTorrentAttempt(attempt => attempt + 1);
+        return;
+      }
+      if (isRemoteActiveRef.current) {
+        ToastAndroid.show(reason, ToastAndroid.LONG);
+        if (!switchToNextStream()) {
+          ToastAndroid.show('Failed to load torrent', ToastAndroid.SHORT);
+        }
+        return;
+      }
+      setTorrentFailure(reason);
     };
 
     const resolveStream = async () => {
@@ -1692,8 +1768,16 @@ const Player = ({route}: Props): React.JSX.Element => {
       setProcessedStreamUrl('');
       setTorrentStartMs(undefined);
       setIsResolvingStream(true);
+      setTorrentFailure(null);
+      setTorrentStats(null);
+      setTorrentStartedAt(Date.now());
+      setVideoReady(false);
+      setIsVideoBuffering(false);
 
       if (isTorrentStream(selectedStream)) {
+        // Stats from the first second: getting torrent info can take a while.
+        const expectedHash = torrentInfoHash(normalizeMagnetLink(selectedStream.link));
+        if (expectedHash) pollStats(expectedHash);
         try {
           if (isDummyTorrentLink(selectedStream.link)) {
             console.warn(
@@ -1711,7 +1795,11 @@ const Player = ({route}: Props): React.JSX.Element => {
           setTorrentDownloaded(0);
           setTorrentDownloadSpeed(0);
           const resolved = await resolveTorrentStream(selectedStream.link, {
-            addTorrent: link => torrentManager.addTorrent(link),
+            // Peers a swarm test connected to are handed over, so the start
+            // does not wait for trackers and the DHT again.
+            addTorrent: link => torrentManager.addTorrent(
+              withKnownPeers(link, freshResult(useSwarmTestStore.getState().results, torrentInfoHash(normalizeMagnetLink(link)))),
+            ),
             deleteTorrent: hash => torrentManager.deleteTorrent(hash, true),
             findVideoFileIndex,
             prepareVideoFile: (hash, fileIndex) =>
@@ -1725,20 +1813,7 @@ const Player = ({route}: Props): React.JSX.Element => {
               torrentManager.getStreamUrl(hash, fileIndex),
             onAdded: infoHash => {
               activeTorrentRef.current = infoHash;
-
-              if (progressIntervalRef.current) {
-                clearInterval(progressIntervalRef.current);
-              }
-              progressIntervalRef.current = setInterval(async () => {
-                try {
-                  const stats = await torrentManager.getStats(infoHash);
-                  if (isMounted) {
-                    setTorrentState(stats.state || '');
-                    setTorrentDownloaded((stats.totalDone || 0) / 1024 / 1024);
-                    setTorrentDownloadSpeed(stats.downloadRate || 0);
-                  }
-                } catch {}
-              }, 1000);
+              if (infoHash !== expectedHash) pollStats(infoHash);
             },
             isCancelled: () => !isMounted,
           });
@@ -1751,6 +1826,7 @@ const Player = ({route}: Props): React.JSX.Element => {
                 ? Math.floor(getStartPosition() * 1000)
                 : undefined,
             );
+            processedForLinkRef.current = selectedStream.link;
             setProcessedStreamUrl(streamUrl);
             setIsResolvingStream(false);
             await preparation;
@@ -1759,12 +1835,15 @@ const Player = ({route}: Props): React.JSX.Element => {
           console.error('Failed to start torrent stream:', error);
           if (isMounted) {
             setIsResolvingStream(false);
-            if (!switchToNextStream()) {
-              ToastAndroid.show('Failed to load torrent', ToastAndroid.SHORT);
+            // A torrent that never reached the player is not cleaned up elsewhere.
+            if (expectedHash && !activeTorrentRef.current) {
+              torrentManager.deleteTorrent(expectedHash, true).catch(() => {});
             }
+            handleTorrentFailure(error, expectedHash);
           }
         }
       } else {
+        processedForLinkRef.current = selectedStream.link;
         setProcessedStreamUrl(selectedStream.link);
         setIsResolvingStream(false);
       }
@@ -1792,7 +1871,63 @@ const Player = ({route}: Props): React.JSX.Element => {
         }
       }
     };
-  }, [selectedStream]);
+  }, [selectedStream, torrentAttempt]);
+
+  // The native watchdog re-announces and reconnects a stalled torrent. If the
+  // video still has not started, add the torrent again, then say why it failed.
+  useEffect(() => {
+    // Getting torrent info has its own 30 s limit in addTorrent.
+    if (!torrentStats?.hasMetadata || torrentFailure || videoReady || !isTorrentStream(selectedStream)) return;
+    const retries = torrentRetriesRef.current;
+    const stalledSeconds = Math.round((torrentStats.stalledMs || 0) / 1000);
+    if (shouldRestartStalledTorrent(torrentStats, videoReady, retries.restarts)) {
+      retries.restarts++;
+      ToastAndroid.show(
+        `No data from peers for ${stalledSeconds} s. Restarting the torrent (${retries.restarts}/${MAX_TORRENT_RESTARTS})…`,
+        ToastAndroid.LONG,
+      );
+      setTorrentStats(null);
+      setTorrentAttempt(attempt => attempt + 1);
+      return;
+    }
+    if ((torrentStats.stalledMs || 0) < STARTUP_STALL_RESTART_MS) return;
+    const reason = torrentStats.numPeers > 0
+      ? `Connected to ${torrentStats.numPeers} peers, but none sent data for ${stalledSeconds} s.`
+      : `No peers have sent data for ${stalledSeconds} s. This release may be dead or blocked on your network.`;
+    if (isRemoteActiveRef.current) {
+      ToastAndroid.show(reason, ToastAndroid.LONG);
+      if (!switchToNextStream()) {
+        ToastAndroid.show('Failed to load torrent', ToastAndroid.SHORT);
+      }
+      return;
+    }
+    setTorrentFailure(reason);
+  }, [torrentStats, torrentFailure, videoReady, selectedStream, switchToNextStream]);
+
+  const retryTorrent = useCallback(() => {
+    torrentRetriesRef.current = {link: selectedStream?.link || '', restarts: 0, reloads: 0, noPeers: 0};
+    setTorrentFailure(null);
+    setTorrentStats(null);
+    setTorrentAttempt(attempt => attempt + 1);
+  }, [selectedStream?.link]);
+
+  const chooseAnotherSource = useCallback(() => {
+    setTorrentFailure(null);
+    // Movies and series reopen the source list; others move to the next server.
+    if (!switchToNextStream()) {
+      setActiveTab('server');
+      setShowSettings(true);
+    }
+  }, [switchToNextStream]);
+
+  // What a torrent is doing while the video is not playing yet or buffers.
+  const torrentStatus = useMemo(() => {
+    if (!isTorrentStream(selectedStream) || !torrentStartedAt) return null;
+    const stage = !torrentStats?.hasMetadata ? 'metadata' : videoReady ? 'buffering' : 'starting';
+    return describeTorrentStatus(torrentStats, stage, Date.now() - torrentStartedAt);
+  }, [selectedStream, torrentStartedAt, torrentStats, videoReady]);
+  const playbackStalled =
+    videoReady && (torrentStats?.stalledMs || 0) >= PLAYBACK_STALL_PROMPT_MS;
 
   const selectedPlayerQuality = useMemo(() => {
     const quality = getPlaybackQuality(videoTracks, loadedVideoSize, selectedStream?.quality);
@@ -1984,6 +2119,39 @@ const Player = ({route}: Props): React.JSX.Element => {
               }
             });
           setShowControls(true);
+          return;
+        }
+      }
+
+      // A torrent read error usually means peers were slow, not a broken
+      // release. Reload where playback stopped (the torrent keeps downloading),
+      // or add it again if it never started, before giving up.
+      if (isTorrentStream(stream)) {
+        const retries = torrentRetriesRef.current;
+        if (videoLoadedRef.current && retries.reloads < MAX_TORRENT_PLAYER_RELOADS) {
+          retries.reloads++;
+          const position = videoPositionRef.current.position;
+          keepPosition(position);
+          setTorrentStartMs(position > 5 ? Math.floor(position * 1000) : undefined);
+          setVideoReady(false);
+          setPlayerReloadKey(key => key + 1);
+          ToastAndroid.show('The stream stalled. Reconnecting…', ToastAndroid.SHORT);
+          return;
+        }
+        if (!videoLoadedRef.current && retries.restarts < MAX_TORRENT_RESTARTS) {
+          retries.restarts++;
+          ToastAndroid.show(
+            `The video did not start. Restarting the torrent (${retries.restarts}/${MAX_TORRENT_RESTARTS})…`,
+            ToastAndroid.LONG,
+          );
+          setTorrentAttempt(attempt => attempt + 1);
+          return;
+        }
+        if (!isRemoteActiveRef.current) {
+          const detail = e?.error?.errorString || e?.error?.errorException || '';
+          setTorrentFailure(
+            `The player could not read the video from the torrent${detail ? ` (${detail})` : ''}.`,
+          );
           return;
         }
       }
@@ -2396,15 +2564,14 @@ const Player = ({route}: Props): React.JSX.Element => {
     }
     // Wait until the server list has loaded and the chosen stream is resolved;
     // otherwise a stale or placeholder URL gets sent to the receiver.
-    if (streamLoading || isResolvingStream || !selectedStream?.link) {
-      return;
-    }
-
-    // Ensure processedStreamUrl is synchronized with selectedStream.link for non-torrent streams
     if (
-      !selectedStream.link.startsWith('magnet:') &&
-      selectedStream.type !== 'torrent' &&
-      processedStreamUrl !== selectedStream.link
+      !isRemoteSourceReady({
+        selectedStream,
+        processedStreamUrl,
+        processedForLink: processedForLinkRef.current,
+        streamLoading,
+        isResolvingStream,
+      })
     ) {
       return;
     }
@@ -2595,62 +2762,25 @@ const Player = ({route}: Props): React.JSX.Element => {
     setToast,
   ]);
 
-  // Enter landscape or portrait (when remote active) and fullscreen on mount & focus
+  // Fullscreen on mount and focus; the orientation follows the screen option above.
   useFocusEffect(
     useCallback(() => {
       if (isRemoteActive) {
-        Orientation.lockToPortrait();
         exitFullScreen();
-        return () => {
-          if (!Platform.isTV) {
-            Orientation.lockToPortrait();
-          } else {
-            Orientation.unlockAllOrientations();
-          }
-        };
+        return undefined;
       }
-
-      Orientation.lockToLandscape();
       goFullScreen();
       reapplyFullscreenMode(
         isFullScreenRef.current,
         () => !isRemoteActiveRef.current && isFullScreenRef.current,
       );
-
-      return () => {
-        if (!Platform.isTV) {
-          Orientation.lockToPortrait();
-        } else {
-          Orientation.unlockAllOrientations();
-        }
-        exitFullScreen();
-      };
+      return () => exitFullScreen();
     }, [isRemoteActive]),
   );
 
   useEffect(() => {
-    if (isRemoteActive) {
-      Orientation.lockToPortrait();
-      exitFullScreen();
-      return () => {
-        if (!Platform.isTV) {
-          Orientation.lockToPortrait();
-        } else {
-          Orientation.unlockAllOrientations();
-        }
-      };
-    }
-
-    Orientation.lockToLandscape();
-    goFullScreen();
-    return () => {
-      if (!Platform.isTV) {
-        Orientation.lockToPortrait();
-      } else {
-        Orientation.unlockAllOrientations();
-      }
-      exitFullScreen();
-    };
+    if (isRemoteActive) return undefined;
+    return () => exitFullScreen();
   }, [isRemoteActive]);
 
   useEffect(() => {
@@ -2993,6 +3123,7 @@ const Player = ({route}: Props): React.JSX.Element => {
         setTextTracks(e.textTracks);
       }
       videoLoadedRef.current = true;
+      setVideoReady(true);
       playbackRetryRef.current = markPlaybackLoaded(
         playbackRetryRef.current,
         selectedStreamRef.current,
@@ -3450,7 +3581,6 @@ const Player = ({route}: Props): React.JSX.Element => {
         className="bg-black flex-1 justify-center items-center">
         <SystemBars hidden={true} />
         <StatusBar translucent={true} hidden={true} />
-        <OrientationLocker orientation={LANDSCAPE} />
         {/* Same back arrow as the main player's top-left control */}
         <SafeAreaView
           style={{position: 'absolute', top: 0, left: 0, padding: 8}}>
@@ -3509,6 +3639,25 @@ const Player = ({route}: Props): React.JSX.Element => {
     );
   }
 
+  // Keep both the local player and receiver screen unmounted until the user
+  // chooses a movie server. No torrent is resolved while this dialog is open.
+  if (requiresServerSelection && localDecision === 'online') {
+    return <SafeAreaView style={{flex: 1, backgroundColor: '#000'}}>
+      <MovieServerDialog
+        streams={streamData}
+        loading={streamLoading}
+        onSelect={setSelectedStream}
+        onDismiss={() => {exitFullScreen(); navigation.goBack();}}
+        subtitle={route.params?.type === 'series'
+          ? [route.params?.primaryTitle, activeEpisode?.title].filter(Boolean).join(' · ')
+          : undefined}
+        loadingText={sourceSearchText(route.params.providerValue || provider.value)}
+        hiddenStreams={hiddenStreams}
+        checking={checkingSwarms}
+      />
+    </SafeAreaView>;
+  }
+
   // Show loading state
   if (
     streamLoading &&
@@ -3522,7 +3671,6 @@ const Player = ({route}: Props): React.JSX.Element => {
         className="bg-black flex-1 justify-center items-center">
         <SystemBars hidden={true} />
         <StatusBar translucent={true} hidden={true} />
-        <OrientationLocker orientation={LANDSCAPE} />
         {/* create ripple effect */}
         <TouchableNativeFeedback
           background={TouchableNativeFeedback.Ripple(
@@ -3536,7 +3684,11 @@ const Player = ({route}: Props): React.JSX.Element => {
               <View className="mb-2">
                 <AnimatedHourglass sandColor={hourglassSandColor} />
               </View>
-              <Text className="text-white text-lg mt-4">Loading stream...</Text>
+              <Text className="text-white text-lg mt-4">Finding sources…</Text>
+              <Text className="text-white text-sm mt-2 opacity-70 text-center px-8">
+                {sourceSearchText(route.params.providerValue || provider.value)}
+              </Text>
+              <ElapsedSeconds style={{color: '#fff', fontSize: 12, marginTop: 4, opacity: 0.6}} />
             </Animated.View>
           </View>
         </TouchableNativeFeedback>
@@ -3555,12 +3707,31 @@ const Player = ({route}: Props): React.JSX.Element => {
       <SafeAreaView className="bg-black flex-1 justify-center items-center">
         <SystemBars hidden={true} />
         <StatusBar translucent={true} hidden={true} />
-        <OrientationLocker orientation={LANDSCAPE} />
-        <Text className="text-red-500 text-lg text-center mb-4">
-          Failed to load stream. Please try again.
+        <Text className="text-red-500 text-lg text-center mb-2">
+          Could not load the list of sources
+        </Text>
+        <Text className="text-white text-sm text-center mb-5 opacity-80 px-10">
+          {streamError?.message || 'The provider did not answer.'}
         </Text>
         <TVFocusable
           hasTVPreferredFocus={true}
+          focusBorderColor="#ffffff"
+          focusScale={1.08}
+          borderRadius={12}
+          style={{
+            backgroundColor: '#ffffff',
+            paddingHorizontal: 24,
+            paddingVertical: 12,
+            borderRadius: 12,
+            marginBottom: 12,
+          }}
+          onPress={() => refetchStreams()}>
+          <Text style={{color: '#000000', fontWeight: 'bold', fontSize: 16}}>
+            Retry
+          </Text>
+        </TVFocusable>
+        <TVFocusable
+          hasTVPreferredFocus={false}
           focusBorderColor="#ffffff"
           focusScale={1.08}
           borderRadius={12}
@@ -3593,11 +3764,6 @@ const Player = ({route}: Props): React.JSX.Element => {
       className="bg-black flex-1 relative">
       <SystemBars hidden={!isRemoteActive && isFullScreen} />
       <StatusBar translucent={true} hidden={!isRemoteActive} />
-      {isRemoteActive ? (
-        <OrientationLocker orientation={PORTRAIT} />
-      ) : (
-        <OrientationLocker orientation={LANDSCAPE} />
-      )}
 
       {/* Local or Remote player */}
       {isRemoteActive ? (
@@ -3709,13 +3875,38 @@ const Player = ({route}: Props): React.JSX.Element => {
           skipIntervals={combinedSkips}
           onSkipPress={handleRemoteSkip}
         />
+      ) : torrentFailure ? (
+        <TorrentFailurePanel
+          message={torrentFailure}
+          server={selectedStream?.server}
+          onRetry={retryTorrent}
+          onChooseSource={chooseAnotherSource}
+          onBack={() => {
+            exitFullScreen();
+            navigation.goBack();
+          }}
+        />
       ) : processedStreamUrl ? (
-        <VideoPlayer {...videoPlayerProps} controlAppearance={controlStyle} subtitleStyle={playbackSubtitleStyle} nativeVideoViewRef={nativeVideoViewRef} headerStatus={torrentHeaderStatus} headerRightInset={toolbarHeaderInset} playbackSuspended={editingControls} controlScale={controlStyle.scale} seekbarScale={controlStyle.seekbarScale} ambientVideoSize={loadedVideoSize} ambientDisabled={isCasting} />
+        <>
+          <VideoPlayer key={playerReloadKey} {...videoPlayerProps} onBufferingChange={setIsVideoBuffering} controlAppearance={controlStyle} subtitleStyle={playbackSubtitleStyle} nativeVideoViewRef={nativeVideoViewRef} headerStatus={torrentHeaderStatus} headerRightInset={toolbarHeaderInset} playbackSuspended={editingControls} controlScale={controlStyle.scale} seekbarScale={controlStyle.seekbarScale} ambientVideoSize={loadedVideoSize} ambientDisabled={isCasting} />
+          {torrentStatus && (!videoReady || isVideoBuffering) && !showSettings && (
+            // Below the centre spinner; touches pass through to the player.
+            <View pointerEvents="box-none" style={{position: 'absolute', left: 0, right: 0, top: '58%', alignItems: 'center', zIndex: 150}}>
+              <TorrentStatusText title={torrentStatus.title} detail={torrentStatus.detail} />
+              {playbackStalled && <TorrentStallActions onRetry={retryTorrent} onChooseSource={chooseAnotherSource} />}
+            </View>
+          )}
+        </>
       ) : (
         <View className="flex-1 justify-center items-center">
           <Animated.View style={[loadingContainerStyle]}>
             <AnimatedHourglass sandColor={hourglassSandColor} />
           </Animated.View>
+          {torrentStatus && (
+            <View style={{marginTop: 18}}>
+              <TorrentStatusText title={torrentStatus.title} detail={torrentStatus.detail} />
+            </View>
+          )}
           <TouchableOpacity
             className="mt-6 flex-row items-center gap-2 px-4 py-2"
             onPress={() => {

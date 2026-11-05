@@ -43,6 +43,8 @@ export interface SkipInterval {
 // getStream
 export interface Stream {
   server: string;
+  /** Release name, when the source reports one. */
+  title?: string;
   link: string;
   type: string;
   quality?: '360' | '480' | '720' | '1080' | '2160' | string;

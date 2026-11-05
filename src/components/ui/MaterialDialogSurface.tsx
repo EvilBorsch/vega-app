@@ -18,6 +18,8 @@ interface MaterialDialogSurfaceProps {
   dismissible?: boolean;
   onDismiss: () => void;
   style?: ViewStyle;
+  /** Use a React Native window for content that measures itself to the screen. */
+  screenSized?: boolean;
 }
 
 const MaterialDialogSurface = ({
@@ -26,6 +28,7 @@ const MaterialDialogSurface = ({
   dismissible = true,
   onDismiss,
   style,
+  screenSized = false,
 }: MaterialDialogSurfaceProps) => {
   const colors = useM3Colors();
   const hostTheme = useM3HostTheme();
@@ -44,7 +47,7 @@ const MaterialDialogSurface = ({
     return null;
   }
 
-  if (isTV) {
+  if (isTV || screenSized) {
     return (
       <Modal
         visible={visible}
@@ -79,7 +82,7 @@ const MaterialDialogSurface = ({
             trapFocusRight
             style={[
               {
-                backgroundColor: '#1E1E1E',
+                backgroundColor: colors.surfaceContainerHigh,
                 borderRadius: 24,
                 maxWidth: 480,
                 width: '90%',

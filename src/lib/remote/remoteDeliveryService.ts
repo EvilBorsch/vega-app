@@ -398,6 +398,20 @@ class RemoteDeliveryService {
     await VegaRemoteDelivery?.retireSessionWhenReady?.(previousId, nextId);
   }
 
+  async waitForStreamReady(sessionId: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        VegaRemoteDelivery.awaitStreamReady(sessionId),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            'Video source is still buffering. Retry or select another server.',
+          )), 120_000);
+        }),
+      ]);
+    } finally {if (timer) clearTimeout(timer);}
+  }
+
   async prepareSubtitle(url: string): Promise<void> {
     const target = new URL(url);
     if (this.serverInfo && target.origin === new URL(this.serverInfo.baseUrl).origin &&
@@ -417,6 +431,13 @@ class RemoteDeliveryService {
   async startCastDiscovery(): Promise<void> {
     if (!VegaRemoteDelivery?.startCastDiscovery) return;
     await VegaRemoteDelivery.startCastDiscovery();
+  }
+
+  /** Cast devices from the active scan above, as react-native-google-cast devices. */
+  onCastDevices<T>(listener: (devices: T[]) => void): () => void {
+    if (Platform.OS !== 'android') return () => {};
+    const subscription = DeviceEventEmitter.addListener('onVegaCastDevices', listener);
+    return () => subscription.remove();
   }
 
   async stopCastDiscovery(): Promise<void> {

@@ -109,6 +109,52 @@ class TorrentManager {
     );
   }
 
+  /**
+   * Peers the DHT knows for each info hash (lowercase hex). Releases nobody
+   * shares come back with 0.
+   */
+  async probeSwarms(
+    infoHashes: string[],
+  ): Promise<{peers: Record<string, number>; nodes: number}> {
+    await this.init();
+    return await TorrentModule.probeSwarms(infoHashes);
+  }
+
+  /**
+   * Starts measuring releases: each downloads the start of its video while a
+   * source list is open. swarmStats reads how they are doing.
+   */
+  async monitorSwarms(magnets: string[]): Promise<void> {
+    await this.init();
+    await TorrentModule.monitorSwarms(magnets.map(normalizeMagnetLink));
+  }
+
+  /** Live peers, bytes and speed of monitored releases, keyed by info hash. */
+  async swarmStats(infoHashes: string[]): Promise<Record<string, any>> {
+    if (!this.isInitialized) return {};
+    return (await TorrentModule.swarmStats(infoHashes)) || {};
+  }
+
+  /** Ends measuring; a release the player took keeps running. */
+  async stopSwarmMonitor(infoHashes: string[]): Promise<void> {
+    if (!this.isInitialized || !infoHashes.length) return;
+    await TorrentModule.stopSwarmMonitor(infoHashes);
+  }
+
+  /** Live seeders and leechers from public trackers, keyed by info hash. */
+  async scrapeSwarms(
+    infoHashes: string[],
+  ): Promise<Record<string, {seeders: number; leechers: number; trackers: number}>> {
+    await this.init();
+    return (await TorrentModule.scrapeSwarms(infoHashes)) || {};
+  }
+
+  /** Keeps a tested release running for the player instead of removing it. */
+  async claimSwarmTest(infoHash: string): Promise<void> {
+    if (!this.isInitialized) return;
+    await TorrentModule.claimSwarmTest(infoHash);
+  }
+
   async getStats(infoHash: string): Promise<TorrentStats> {
     await this.init();
     return await TorrentModule.getStats(infoHash);

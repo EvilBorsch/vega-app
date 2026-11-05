@@ -8,6 +8,7 @@ jest.mock('react-native', () => ({
     VegaDlna: {
       setAVTransportURI: jest.fn(async () => {}),
       play: jest.fn(async () => {}),
+      stop: jest.fn(async () => {}),
       getPositionInfo: jest.fn(),
     },
   },
@@ -26,6 +27,44 @@ beforeEach(() => {
   jest.useFakeTimers();
   jest.clearAllMocks();
   useRemoteStore.getState().resetSession();
+});
+it('stops a previous transport before setting a new URI', async () => {
+  await dlna.loadMedia(device, 'http://phone/B');
+  expect(native.stop).toHaveBeenCalledWith('http://tv');
+  expect(native.stop.mock.invocationCallOrder[0]).toBeLessThan(
+    native.setAVTransportURI.mock.invocationCallOrder[0],
+  );
+});
+it('does not set a new URI when canceled during Stop', async () => {
+  let finish!: () => void;
+  native.stop.mockImplementationOnce(() => new Promise<void>(resolve => {finish = resolve;}));
+  let current = true;
+  const loading = dlna.loadMedia(device, 'http://phone/B', 'B', undefined, 0, 0, () => current);
+  const canceled = expect(loading).rejects.toThrow('canceled');
+  await tick();
+  current = false;
+  finish();
+  await canceled;
+  expect(native.setAVTransportURI).not.toHaveBeenCalled();
+});
+it('continues when Stop reports an already stopped renderer', async () => {
+  native.stop.mockRejectedValueOnce(new Error('Stop failed'));
+  await dlna.loadMedia(device, 'http://phone/B');
+  expect(native.play).toHaveBeenCalledTimes(1);
+});
+it('retries a transition rejection once after stopping the renderer', async () => {
+  native.setAVTransportURI.mockRejectedValueOnce(new Error('UPnP error 701: Transition not available'));
+  const loading = dlna.loadMedia(device, 'http://phone/B');
+  await jest.advanceTimersByTimeAsync(500);
+  await loading;
+  expect(native.setAVTransportURI).toHaveBeenCalledTimes(2);
+  expect(native.play).toHaveBeenCalledTimes(1);
+});
+it.each([601, 714])('does not treat argument/media failure %s as transition fault 701', async code => {
+  native.setAVTransportURI.mockRejectedValueOnce(new Error(`UPnP error ${code}: Invalid media argument`));
+  await expect(dlna.loadMedia(device, 'http://phone/B')).rejects.toThrow(String(code));
+  expect(native.setAVTransportURI).toHaveBeenCalledTimes(1);
+  expect(native.play).not.toHaveBeenCalled();
 });
 afterEach(() => {
   dlna.stopPolling();
@@ -65,6 +104,7 @@ it('does not send Play when a load is canceled while setting its URI', async () 
     () => current,
   );
   const canceled = expect(loading).rejects.toThrow('canceled');
+  await tick();
   current = false;
   resolve();
   await canceled;

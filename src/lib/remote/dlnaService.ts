@@ -95,14 +95,33 @@ class DlnaService {
       subtitleUrl,
     });
     console.info('[DlnaLoad] subtitleUrl:', subtitleUrl || 'none');
-    await VegaDlna.setAVTransportURI(
-      device.controlUrl,
-      mediaUrl,
-      title,
-      subtitleUrl || null,
+    const assertCurrent = () => {
+      if (!isCurrent() || generation !== this.pollingGeneration)
+        throw new RemotePlaybackCanceledError('DLNA load canceled');
+    };
+    assertCurrent();
+    // LG and other renderers reject URI replacement while their previous
+    // transport is playing or transitioning. Stop is best effort: an empty
+    // transport can reject Stop even though it is ready for a new URI.
+    await VegaDlna.stop(device.controlUrl).catch(() => {});
+    assertCurrent();
+    const setUri = () => VegaDlna.setAVTransportURI(
+      device.controlUrl, mediaUrl, title, subtitleUrl || null,
     );
-    if (!isCurrent() || generation !== this.pollingGeneration)
-      throw new RemotePlaybackCanceledError('DLNA load canceled');
+    try {
+      await setUri();
+    } catch (error) {
+      assertCurrent();
+      if (!/UPnP error 701\b/i.test(String((error as Error)?.message || error))) throw error;
+      // Stop can complete before the renderer has left TRANSITIONING. Give
+      // that one state error a bounded retry; do not retry bad media/URLs.
+      await VegaDlna.stop(device.controlUrl).catch(() => {});
+      assertCurrent();
+      await new Promise(resolve => setTimeout(resolve, 300));
+      assertCurrent();
+      await setUri();
+    }
+    assertCurrent();
     await VegaDlna.play(device.controlUrl);
     if (!isCurrent() || generation !== this.pollingGeneration)
       throw new RemotePlaybackCanceledError('DLNA load canceled');

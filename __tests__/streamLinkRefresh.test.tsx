@@ -126,6 +126,8 @@ it('moves to the same server when new links replace the old ones', async () => {
 it('reports no new link when the provider returns the same one', async () => {
   mockGetStream.mockResolvedValue([serverA(1), serverB(1)]);
   await mount();
+  // Episodes open on a source list.
+  act(() => streams.setSelectedStream(streams.streamData[0]));
   const selected = streams.selectedStream;
 
   mockGetStream.mockResolvedValue([serverA(1), serverB(1)]);
@@ -141,6 +143,7 @@ it('reports no new link when the provider returns the same one', async () => {
 it('reports no new link when the refresh fails', async () => {
   mockGetStream.mockResolvedValue([serverA(1)]);
   await mount();
+  act(() => streams.setSelectedStream(streams.streamData[0]));
 
   mockGetStream.mockRejectedValue(new Error('Network error'));
   let refreshed: boolean | undefined;

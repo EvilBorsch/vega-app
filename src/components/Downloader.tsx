@@ -16,7 +16,7 @@ import { settingsStorage } from '../lib/storage';
 import { useTVFocusBorderColor } from '../lib/tv/useTVFocusBorderColor';
 import { isTV } from '../lib/tv';
 import { TVFocusable } from './tv';
-import { providerManager } from '../lib/services/ProviderManager';
+import {getStreamSources} from '../lib/services/getStreamSources';
 import {
   deleteDownloadedFileByBaseName,
   LEGACY_SUBTITLE_EXTENSIONS,
@@ -480,7 +480,7 @@ const DownloadComponent = ({
     setServerLoading(true);
     setServerError(null);
     try {
-      const availableServers = await providerManager.getStream({
+      const availableServers = await getStreamSources({
         link,
         type,
         signal: new AbortController().signal,
@@ -724,7 +724,7 @@ const DownloadComponent = ({
         data={servers}
         loading={serverLoading}
         error={serverError}
-        title=""
+        title={[showName || title, episodeName].filter(Boolean).join(' · ')}
         videoDownloaded={isVideoDownloaded}
         downloadedServer={videoDownload?.server}
         onDeleteVideo={deleteVideoDownload}

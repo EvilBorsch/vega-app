@@ -1,4 +1,3 @@
-import * as FileSystem from 'expo-file-system/legacy';
 import {NativeModules} from 'react-native';
 import type {SafDownloadLocation} from '../downloadLocation';
 import {
@@ -10,6 +9,16 @@ import {
 let manifestWriteQueue: Promise<void> = Promise.resolve();
 
 type DirectoryEntry = {uri: string; name: string; isDirectory: boolean};
+
+const readManifestText = (uri: string): Promise<string> => {
+  const storage = NativeModules.VegaSyncStorage as
+    | {readManifest?: (document: string) => Promise<string>}
+    | undefined;
+  if (!storage?.readManifest) throw new Error('Update Vega to enable sync document reads');
+  // Expo's legacy SAF reader accepts only the external-storage provider;
+  // Android Downloads uses equally valid opaque msd/msf document ids.
+  return storage.readManifest(uri);
+};
 
 const listDirectory = (uri: string): Promise<DirectoryEntry[]> => {
   const storage = NativeModules.VegaSyncStorage as
@@ -115,7 +124,7 @@ export const readMobileSyncManifests = async (
       )
       .map(async entry => {
         const content =
-          await FileSystem.StorageAccessFramework.readAsStringAsync(entry.uri);
+          await readManifestText(entry.uri);
         return parseSyncManifest(content);
       }),
   );
@@ -129,7 +138,7 @@ const readManifestFile = async (
 ): Promise<VegaSyncManifest | null> => {
   try {
     return parseSyncManifest(
-      await FileSystem.StorageAccessFramework.readAsStringAsync(fileUri),
+      await readManifestText(fileUri),
     );
   } catch {
     return null;
@@ -169,7 +178,7 @@ const writeMobileSyncManifestNow = async (
     throw new Error('Update Vega to enable safe sync document writes');
   await writer.writeManifest(fileUri, content);
   const written =
-    await FileSystem.StorageAccessFramework.readAsStringAsync(fileUri);
+    await readManifestText(fileUri);
   if (written !== content || !parseSyncManifest(written)) {
     throw new Error('Vega sync manifest verification failed');
   }

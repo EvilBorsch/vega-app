@@ -3,7 +3,10 @@ import RemovableSubtitleRow from '../RemovableSubtitleRow';
 import {languageLabel} from '../../lib/player/languageLabel';
 import {isRemotePlaybackCanceled} from '../../lib/remote/remotePlaybackErrors';
 import * as DocumentPicker from 'expo-document-picker';
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
+import {filterStreams} from '../../lib/player/streamFilters';
+import StreamFilterControls from '../StreamFilterControls';
+import StreamSourceCard from '../StreamSourceCard';
 import {Pressable, View} from 'react-native';
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import {MAX_PLAYER_DELAY_MS, formatDelay} from '../PlayerDelayControl';
@@ -300,6 +303,9 @@ export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
   const [searchQuery, setSearchQuery] = useState(subtitleSearchQuery || '');
   const colors = useM3Colors();
   const servers = useRemoteStore(state => state.servers);
+  const [qualityFilters, setQualityFilters] = useState<string[]>([]);
+  const [languageFilters, setLanguageFilters] = useState<string[]>([]);
+  const filteredServers = useMemo(() => filterStreams(servers, qualityFilters, languageFilters), [servers, qualityFilters, languageFilters]);
   const activeServerId = useRemoteStore(state => state.activeServerId);
   const audioTracks = useRemoteStore(state => state.audioTracks);
   const activeAudioTrackId = useRemoteStore(state => state.activeAudioTrackId);
@@ -406,22 +412,14 @@ export const RemoteSettingsSheets: React.FC<RemoteSettingsSheetsProps> = ({
         return (
           <>
             <RemoteSheetSectionLabel text="Server" />
-            {servers.length === 0 ? (
-              <RemoteSheetEmpty text="No other servers for this title" />
+            {servers.length > 1 && <StreamFilterControls streams={servers} qualities={qualityFilters} languages={languageFilters} onQualities={setQualityFilters} onLanguages={setLanguageFilters} />}
+            {filteredServers.length === 0 ? (
+              <RemoteSheetEmpty text={servers.length ? 'No matching sources. Change filters.' : 'No other servers for this title'} />
             ) : (
-              servers.map((server, i) => (
-                <RemoteSheetOption
+              filteredServers.map((server, i) => (
+                <StreamSourceCard
                   key={server.id || i}
-                  icon="dns"
-                  title={server.name}
-                  supportingText={[
-                    server.quality,
-                    ...(server.tags || []).filter(
-                      t => t && t !== server.quality,
-                    ),
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
+                  stream={{server: server.name, quality: server.quality, tags: server.tags}}
                   selected={server.id === activeServerId}
                   onPress={() =>
                     select(() => {

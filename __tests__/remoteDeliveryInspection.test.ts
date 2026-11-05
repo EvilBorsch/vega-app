@@ -7,11 +7,22 @@ jest.mock('react-native', () => ({
     inspectMediaTracks: jest.fn(), stopServer: jest.fn(async () => {}),
     startServer: jest.fn(async () => ({baseUrl: 'http://phone:1234', port: 1234, lanIp: 'phone'})),
     prepareSubtitle: jest.fn(async () => true),
+    awaitStreamReady: jest.fn(async () => true),
   }},
 }));
 jest.mock('../src/lib/remote/mkvParser', () => ({fetchAndParseMkvHeader: jest.fn()}));
 const inspect = NativeModules.VegaRemoteDelivery.inspectMediaTracks as jest.Mock;
 const info = {hasVideo: true, durationSeconds: 300, audioTracks: [], subtitleTracks: []};
+it('bounds warmup even if FFmpeg only produced a header and native media readiness never arrives', async () => {
+  jest.useFakeTimers();
+  NativeModules.VegaRemoteDelivery.awaitStreamReady.mockImplementationOnce(() => new Promise(() => {}));
+  try {
+    const waiting = service.waitForStreamReady('cold-torrent');
+    const failed = expect(waiting).rejects.toThrow('buffering');
+    await jest.advanceTimersByTimeAsync(120_000);
+    await failed;
+  } finally {jest.useRealTimers();}
+});
 beforeEach(async () => {await service.stopServer(); inspect.mockReset().mockResolvedValue(info);});
 
 it('shares concurrent inspections and reuses metadata for the same source/headers', async () => {

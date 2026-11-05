@@ -158,6 +158,8 @@ describe('useNextEpisodePrefetch', () => {
   it('opens a prefetched next episode without asking the provider again', async () => {
     mockGetStream.mockImplementation(async ({link}) => [server({link})]);
     await mount();
+    // The viewer picks the episode's source; later episodes continue with it.
+    act(() => streams.setSelectedStream(streams.streamData[0]));
     act(() => prefetch(100, 1500));
     await flush();
     expect(mockGetStream).toHaveBeenCalledTimes(1);
@@ -188,6 +190,7 @@ describe('useNextEpisodePrefetch', () => {
       return [server({link})];
     });
     await mount();
+    act(() => streams.setSelectedStream(streams.streamData[0]));
     await nearEnd();
     expect(mockGetStream).toHaveBeenCalledTimes(2);
     expect(streams.selectedStream).toEqual(server(episode1));

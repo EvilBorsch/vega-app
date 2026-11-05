@@ -23,6 +23,10 @@ const mockCreate = jest.fn(
 const mockNative = {
   listDirectory: mockList,
   createDocument: mockCreate,
+  readManifest: jest.fn(async (uri: string) => {
+    if (!mockFiles.has(uri)) throw new Error('File missing');
+    return mockFiles.get(uri)!;
+  }),
   writeManifest: jest.fn(async (uri: string, text: string) => {
     mockFiles.set(uri, text);
   }),
@@ -49,6 +53,7 @@ jest.mock('expo-file-system/legacy', () => ({
       throw new Error('Unsafe legacy creation');
     }),
     readAsStringAsync: async (uri: string) => {
+      if (uri.startsWith('content://com.android.providers.downloads.documents/')) throw new Error('Unsupported scheme');
       if (!mockFiles.has(uri)) throw new Error('File missing');
       return mockFiles.get(uri)!;
     },
@@ -85,6 +90,7 @@ beforeEach(() => {
   mockEntries.set(location.uri, []);
   mockList.mockClear();
   mockCreate.mockClear();
+  mockNative.readManifest.mockClear();
   mockNative.writeManifest.mockReset();
   mockNative.writeManifest.mockImplementation(async (uri, text) => {
     mockFiles.set(uri, text);
@@ -92,6 +98,14 @@ beforeEach(() => {
 });
 
 describe('sync document storage', () => {
+  it('reads a manifest selected through Android Downloads document ids', async () => {
+    const directory = await mockCreate(location.uri, '.vega-sync', true);
+    const uri = 'content://com.android.providers.downloads.documents/tree/msd%3A5046/document/msf%3A5048';
+    mockEntries.get(directory)!.push({uri, name: 'vega-peer.json', isDirectory: false});
+    mockFiles.set(uri, JSON.stringify(manifest()));
+    expect(await readMobileSyncManifests(location)).toEqual([manifest()]);
+    expect(mockNative.readManifest).toHaveBeenCalledWith(uri);
+  });
   it('reuses one folder and manifest across 40 writes with opaque document ids', async () => {
     for (let revision = 1; revision <= 40; revision++) {
       await writeMobileSyncManifest(location, manifest(revision));

@@ -1,0 +1,161 @@
+import {torrentInfoHash} from '../providers/torrentIdentity';
+import {useCallback, useMemo, useState} from 'react';
+import {Platform} from 'react-native';
+import {useQuery} from '@tanstack/react-query';
+import type {Stream} from '../providers/types';
+import {mainStorage} from '../storage';
+import {torrentManager} from '../torrentManager';
+
+/** Peers the DHT returned per info hash (TorrentModule.probeSwarms). */
+export type SwarmProbe = {peers: Record<string, number>};
+
+const DEAD_KEY = 'DeadReleases:v1';
+// A swarm can come back; a release that had nobody is offered again tomorrow.
+const DEAD_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const streamInfoHash = (stream?: Pick<Stream, 'link'>): string | undefined =>
+  torrentInfoHash(stream?.link);
+
+/** A seeder count an index measured recently ("👤12"), not an old snapshot. */
+export const liveSeeders = (stream: Pick<Stream, 'tag' | 'tags'>): number | undefined => {
+  const match = [...(stream.tags || []), stream.tag || ''].join(' ').match(/👤\s*(\d+)/);
+  return match ? Number(match[1]) : undefined;
+};
+
+/** Live seeders and leechers from public trackers (UDP scrape), per info hash. */
+export type SwarmScrape = Record<string, {seeders: number; leechers: number; trackers?: number}>;
+
+// Swarm counts in a release's labels: live (👤, ⬇), an old snapshot (≈) or DHT peers (👥).
+const SWARM_TAG = /^(?:👤\s*\d+|S:\s*\d+|⬇\s*\d+|≈\d+ seeders.*|👥\s*\d+)$/i;
+
+/**
+ * The release with its swarm counts replaced by what public trackers say now.
+ * A successful current response, including zero, replaces an older advertised
+ * count. No response leaves the provider metadata available as a fallback.
+ */
+export const withLiveCounts = (stream: Stream, live?: {seeders: number; leechers: number}): Stream => {
+  if (!live) return stream;
+  const seeders = Math.max(0, live.seeders);
+  const swarm = [`👤${seeders}`, ...(live.leechers > 0 ? [`⬇${live.leechers}`] : [])];
+  const splice = (parts: string[]) => {
+    const at = parts.findIndex(part => SWARM_TAG.test(part.trim()));
+    const kept = parts.filter(part => !SWARM_TAG.test(part.trim()));
+    const position = at < 0 ? Math.min(1, kept.length) : at;
+    return [...kept.slice(0, position), ...swarm, ...kept.slice(position)];
+  };
+  return {
+    ...stream,
+    tags: splice(stream.tags || []),
+    tag: stream.tag ? splice(stream.tag.split(/\s*[•·\n]\s*/)).join(' • ') : stream.tag,
+  };
+};
+
+/**
+ * Whether a probe says anything: when the DHT is unreachable every lookup
+ * comes back empty, and that must not hide every release.
+ */
+export const probeIsConclusive = (probe?: SwarmProbe): boolean => {
+  const counts = Object.values(probe?.peers || {});
+  const found = counts.filter(count => count > 0).length;
+  return counts.length > 0 && found >= Math.max(1, Math.ceil(counts.length * 0.15));
+};
+
+const readDead = (): Record<string, number> => {
+  try {
+    const saved = JSON.parse(mainStorage.getString(DEAD_KEY) || '{}');
+    return saved && typeof saved === 'object' ? saved : {};
+  } catch {
+    return {};
+  }
+};
+
+/** Releases that failed to find a single peer when played, still within a day. */
+export const deadReleases = (now = Date.now()): Set<string> =>
+  new Set(Object.entries(readDead()).filter(([, until]) => until > now).map(([hash]) => hash));
+
+export const markReleaseDead = (hash: string, now = Date.now()): void => {
+  const dead = Object.fromEntries(Object.entries(readDead()).filter(([, until]) => until > now));
+  dead[hash.toLowerCase()] = now + DEAD_TTL_MS;
+  try {
+    mainStorage.setString(DEAD_KEY, JSON.stringify(dead));
+  } catch {}
+};
+
+/**
+ * Hides releases nobody shares and labels the ones only the DHT vouches for.
+ * A release with a fresh seeder count from an index, the playing one and a
+ * remembered one stay listed whatever the probe says.
+ */
+export const applySwarmHealth = (
+  streams: Stream[],
+  probe: SwarmProbe | undefined,
+  dead: Set<string>,
+  keep: Set<string>,
+  scrape?: SwarmScrape,
+): {visible: Stream[]; hidden: Stream[]} => {
+  const visible: Stream[] = [];
+  const hidden: Stream[] = [];
+  for (const listed of streams) {
+    const listedHash = streamInfoHash(listed);
+    const stream = listedHash && scrape ? withLiveCounts(listed, scrape[listedHash]) : listed;
+    const hash = streamInfoHash(stream);
+    // The release playing now stays; one that found no peer when played goes,
+    // even if Resume remembers it; a remembered one is never hidden by a probe.
+    if (!hash || keep.has(stream.link) || (!dead.has(hash) && keep.has(hash))) {
+      visible.push(stream);
+      continue;
+    }
+    const peers = probe?.peers[hash];
+    const seeded = (liveSeeders(stream) || 0) > 0;
+    if (dead.has(hash)) {
+      hidden.push({...stream, tags: [...(stream.tags || []), 'No peers'], tag: [stream.tag, 'No peers'].filter(Boolean).join(' • ')});
+      continue;
+    }
+    visible.push(peers && !seeded
+      ? {...stream, tags: [...(stream.tags || []), `👥${peers}`], tag: [stream.tag, `👥${peers}`].filter(Boolean).join(' • ')}
+      : stream);
+  }
+  return {visible, hidden};
+};
+
+/**
+ * Probes the swarms of a source list once it is shown, so releases nobody
+ * shares disappear before one is picked.
+ */
+export const useSwarmHealth = (
+  streams: Stream[],
+  {enabled, keep}: {enabled: boolean; keep: Set<string>},
+) => {
+  const hashes = useMemo(
+    () => [...new Set(streams.filter(stream => stream.type === 'torrent').map(streamInfoHash).filter(Boolean))].sort() as string[],
+    [streams],
+  );
+  const [deadVersion, setDeadVersion] = useState(0);
+  // Live counts from public trackers, asked once per list.
+  const {data: scrape, isFetching: fetchingCounts} = useQuery({
+    queryKey: ['swarmScrape', hashes.join(',')],
+    queryFn: async (): Promise<SwarmScrape> => torrentManager.scrapeSwarms(hashes),
+    enabled: enabled && Platform.OS === 'android' && hashes.length > 0,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
+    retry: false,
+  });
+  const {data: probe, isFetching} = useQuery({
+    queryKey: ['swarmProbe', hashes.join(',')],
+    queryFn: async (): Promise<SwarmProbe> => torrentManager.probeSwarms(hashes),
+    enabled: enabled && Platform.OS === 'android' && hashes.length > 0,
+    staleTime: 10 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
+    retry: false,
+  });
+  const result = useMemo(
+    () => applySwarmHealth(streams, probe, deadReleases(), keep, scrape),
+    // deadVersion re-reads the dead list after a release is marked.
+    [streams, probe, keep, deadVersion, scrape],
+  );
+  const markDead = useCallback((hash: string) => {
+    markReleaseDead(hash);
+    setDeadVersion(version => version + 1);
+  }, []);
+  return {...result, checking: enabled && hashes.length > 0 && (fetchingCounts || (isFetching && !probe)), markDead};
+};

@@ -5,6 +5,7 @@ import PlayerMenuRow from '../src/components/PlayerMenuRow';
 import type {Stream} from '../src/lib/providers/types';
 
 const mockRowRender = jest.fn();
+jest.mock('../src/components/tv', () => ({TVFocusable: require('react-native').Pressable}));
 let mockIsTV = false;
 jest.mock('../src/lib/tv/constants', () => ({
   get isTV() {
@@ -105,6 +106,20 @@ it('preserves stream objects and quality indexes when selecting visible rows', (
   expect(props.onSelectQuality).toHaveBeenCalledWith(1000);
   select('Local video');
   expect(props.onSelectLocal).toHaveBeenCalledTimes(1);
+  act(() => tree.unmount());
+});
+it('narrows source rows by quality and language without starting playback', () => {
+  const choices = [
+    {...streams[0], server: 'Russian', quality: '1080', tags: ['RU']},
+    {...streams[1], server: 'English', quality: '2160', tags: ['EN']},
+  ];
+  let tree!: renderer.ReactTestRenderer;
+  act(() => {tree = renderer.create(<PlayerSourceMenu {...props} streams={choices} />);});
+  act(() => {tree.root.findAllByProps({accessibilityLabel: 'Quality: 1080p'})[0].props.onPress();});
+  act(() => {tree.root.findAllByProps({accessibilityLabel: 'Language: RU'})[0].props.onPress();});
+  expect(tree.root.findAllByType(PlayerMenuRow).map(row => row.props.title)).toContain('Russian');
+  expect(tree.root.findAllByType(PlayerMenuRow).map(row => row.props.title)).not.toContain('English');
+  expect(props.onSelectStream).not.toHaveBeenCalled();
   act(() => tree.unmount());
 });
 

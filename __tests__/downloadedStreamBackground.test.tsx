@@ -250,7 +250,9 @@ it('still shows foreground loading when no local file exists', async () => {
     resolve([remote]);
   });
   await flush();
-  expect(streams.selectedStream.link).toBe(remote.link);
+  // Episodes then open on the source list rather than the first server.
+  expect(streams.streamData.map(stream => stream.link)).toEqual([remote.link]);
+  expect(streams.requiresServerSelection).toBe(true);
   expect(streams.isLoading).toBe(false);
 });
 
@@ -273,7 +275,10 @@ it('falls back to remote servers when the downloaded file fails to load', async 
   expect(handled).toBe(true);
   await flush();
   expect(mockGetStream).toHaveBeenCalledTimes(1);
-  expect(streams.selectedStream.link).toBe(remote.link);
+  // The online servers are offered to choose from.
+  expect(streams.streamData.map(stream => stream.link)).toEqual([remote.link]);
+  expect(streams.selectedStream.link).toBe('');
+  expect(streams.requiresServerSelection).toBe(true);
 });
 
 it('surfaces an error when the download fails and no remote server loads', async () => {

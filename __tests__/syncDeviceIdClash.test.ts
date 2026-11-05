@@ -114,6 +114,7 @@ jest.mock('react-native', () => ({
       writeManifest: async (uri: string, content: string) => {
         mockFiles.set(uri, content);
       },
+      readManifest: async (uri: string) => mockFiles.get(uri) ?? '',
     },
   },
 }));

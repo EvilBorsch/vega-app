@@ -27,6 +27,26 @@ import { settingsStorage } from '../lib/storage';
 import { useM3Colors } from '../theme/M3PaletteContext';
 import { isTV } from '../lib/tv';
 import { TVFocusable, TVFocusGuide } from './tv';
+import MovieServerDialog from './MovieServerDialog';
+import {useSwarmHealth} from '../lib/player/swarmHealth';
+
+const KEEP_DOWNLOAD_SOURCES = new Set<string>();
+
+function DownloadSourcePicker({streams, loading, title, error, onSelect, onDismiss, footer, renderSourceActions}: {
+  streams: Stream[];
+  loading: boolean;
+  title?: string;
+  error?: string | null;
+  onSelect: (stream: Stream) => void;
+  onDismiss: () => void;
+  footer?: React.ReactNode;
+  renderSourceActions?: (stream: Stream, select: (onSelected?: () => void) => Promise<void>) => React.ReactNode;
+}) {
+  const swarm = useSwarmHealth(streams, {enabled: !loading, keep: KEEP_DOWNLOAD_SOURCES});
+  return <MovieServerDialog streams={swarm.visible} hiddenStreams={swarm.hidden} checking={swarm.checking}
+    loading={loading} subtitle={title} error={error} action="download" onSelect={onSelect} onDismiss={onDismiss}
+    footer={footer} renderSourceActions={renderSourceActions} />;
+}
 
 const NativeTouchableOpacity = TouchableOpacity;
 
@@ -83,61 +103,12 @@ const SheetButton = ({
   );
 };
 
-const SheetRow = ({children, style, onPress}: {
-  children: React.ReactNode;
-  style: StyleProp<ViewStyle>;
-  onPress: () => void;
-}) => isTV ? (
-  <View style={style}>{children}</View>
-) : (
-  <NativeTouchableOpacity activeOpacity={0.7} style={style} onPress={onPress}>
-    {children}
-  </NativeTouchableOpacity>
-);
-
-const SheetRowMain = ({children, style, onPress, label, preferred, focusRef}: {
-  children: React.ReactNode;
-  style: StyleProp<ViewStyle>;
-  onPress: () => void;
-  label: string;
-  preferred: boolean;
-  focusRef?: React.Ref<View>;
-}) => isTV ? (
-  <TVFocusable
-    ref={focusRef}
-    accessibilityRole="button"
-    accessibilityLabel={label}
-    hasTVPreferredFocus={preferred}
-    borderRadius={12}
-    focusScale={1}
-    style={style}
-    onPress={onPress}>
-    {children}
-  </TVFocusable>
-) : <View style={style}>{children}</View>;
-
 export interface DownloadedSubtitleItem {
   id: string;
   title: string;
   language?: string;
   filePath?: string;
 }
-
-const formatQualityLabel = (quality?: string): string => {
-  if (!quality) return '';
-  const trimmed = quality.trim();
-  const lower = trimmed.toLowerCase();
-  if (lower === 'auto' || lower === '4k' || lower === 'uhd' || lower === 'hd') {
-    return trimmed;
-  }
-  if (lower.endsWith('p')) {
-    return trimmed;
-  }
-  if (/^\d+$/.test(trimmed)) {
-    return `${trimmed}p`;
-  }
-  return trimmed;
-};
 
 type Props = {
   data: Stream[];
@@ -177,10 +148,8 @@ const DownloadBottomSheet = ({
 }: Props) => {
   const bottomSheetRef = useRef<BottomSheet>(null);
   const tvCloseRef = useRef<View>(null);
-  const tvFirstRowRef = useRef<View>(null);
   const closeSheet = () => {
-    if (isTV) setModal(false);
-    else bottomSheetRef.current?.close?.();
+    setModal(false);
   };
   const colors = useM3Colors();
   const [activeTab, setActiveTab] = React.useState<1 | 2>(1);
@@ -304,237 +273,7 @@ const DownloadBottomSheet = ({
       );
     }
 
-    if (loading) {
-      return (
-        <View style={{ alignItems: 'center', paddingVertical: 40 }}>
-          <LoadingIndicator size={60} color={colors.primary} />
-        </View>
-      );
-    }
-
-    if (error && streams.length === 0) {
-      return (
-        <View style={{ alignItems: 'center', paddingVertical: 36 }}>
-          <MaterialCommunityIcons
-            name="alert-circle-outline"
-            size={40}
-            color={colors.error}
-          />
-          <Text
-            style={{
-              color: colors.error,
-              fontSize: 14,
-              fontWeight: '600',
-              marginTop: 10,
-              textAlign: 'center',
-            }}>
-            {error}
-          </Text>
-        </View>
-      );
-    }
-
-    if (streams.length === 0) {
-      return (
-        <View style={{ alignItems: 'center', paddingVertical: 36 }}>
-          <MaterialCommunityIcons
-            name="cloud-off-outline"
-            size={40}
-            color={colors.onSurfaceVariant}
-          />
-          <Text
-            style={{
-              color: colors.onSurfaceVariant,
-              fontSize: 14,
-              marginTop: 10,
-              textAlign: 'center',
-            }}>
-            No download servers available
-          </Text>
-        </View>
-      );
-    }
-
-    return streams.map((item, index) => (
-      <SheetRow
-        key={index}
-        style={{
-          alignItems: 'center',
-          backgroundColor: colors.surfaceContainerHighest,
-          borderColor: colors.outlineVariant,
-          borderRadius: 16,
-          borderWidth: 1,
-          flexDirection: 'row',
-          gap: 10,
-          justifyContent: 'space-between',
-          marginVertical: 5,
-          paddingHorizontal: 14,
-          paddingVertical: 12,
-        }}
-        onPress={() => {
-          if (isAlwaysExternal) {
-            onPressExternalVideo?.(item);
-          } else {
-            onPressVideo(item);
-          }
-          closeSheet();
-        }}>
-        <SheetRowMain
-          label={`Download ${item.server || 'Unknown Server'}${item.quality ? `, ${formatQualityLabel(item.quality)}` : ''}`}
-          preferred={!hasSubtitles && index === 0}
-          focusRef={index === 0 ? tvFirstRowRef : undefined}
-          onPress={() => {
-            if (isAlwaysExternal) {
-              onPressExternalVideo?.(item);
-            } else {
-              onPressVideo(item);
-            }
-            closeSheet();
-          }}
-          style={{
-            flex: 1,
-            justifyContent: 'center',
-            marginRight: 10,
-            minHeight: isTV ? 52 : undefined,
-          }}>
-          <Text
-            numberOfLines={1}
-            style={{
-              color: colors.onSurface,
-              fontSize: 15,
-              fontWeight: '600',
-            }}>
-            {item.server || 'Unknown Server'}
-          </Text>
-          {(() => {
-            const rawTags: string[] = Array.isArray(item.tags)
-              ? item.tags
-              : typeof item.tag === 'string'
-              ? [item.tag]
-              : [];
-            const tags = rawTags
-              .map(t => (typeof t === 'string' ? t.trim() : ''))
-              .filter(
-                t =>
-                  Boolean(t) &&
-                  t.toLowerCase() !== item.quality?.trim().toLowerCase(),
-              );
-
-            const hasQuality = Boolean(item.quality);
-            const hasTags = tags.length > 0;
-
-            if (!hasQuality && !hasTags) {
-              return null;
-            }
-
-            return (
-              <View
-                style={{
-                  alignItems: 'center',
-                  flexDirection: 'row',
-                  flexWrap: 'wrap',
-                  gap: 6,
-                  marginTop: 4,
-                }}>
-                {item.quality ? (
-                  <View
-                    style={{
-                      backgroundColor: colors.secondaryContainer,
-                      borderRadius: 8,
-                      paddingHorizontal: 7,
-                      paddingVertical: 2,
-                    }}>
-                    <Text
-                      style={{
-                        color: colors.onSecondaryContainer,
-                        fontSize: 11,
-                        fontWeight: '700',
-                      }}>
-                      {formatQualityLabel(item.quality)}
-                    </Text>
-                  </View>
-                ) : null}
-                {tags.map((t, tIdx) => (
-                  <View
-                    key={tIdx}
-                    style={{
-                      backgroundColor: colors.surfaceContainerHighest,
-                      borderRadius: 8,
-                      paddingHorizontal: 7,
-                      paddingVertical: 2,
-                    }}>
-                    <Text
-                      style={{
-                        color: colors.onSurfaceVariant,
-                        fontSize: 11,
-                        fontWeight: '700',
-                      }}>
-                      {t.toUpperCase()}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            );
-          })()}
-        </SheetRowMain>
-
-        {/* Action buttons */}
-        <View
-          style={{
-            alignItems: 'center',
-            flexDirection: 'row',
-            gap: 6,
-            flexShrink: 0,
-          }}>
-          {/* Copy Button */}
-          <SheetButton
-            accessibilityLabel={`Copy link for ${item.server || 'Unknown Server'}`}
-            activeOpacity={0.7}
-            onPress={() => handleCopy(item.link)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={{
-              alignItems: 'center',
-              backgroundColor: colors.surfaceContainerHighest,
-              borderRadius: 10,
-              justifyContent: 'center',
-              padding: 8,
-            }}>
-            <MaterialCommunityIcons
-              name="content-copy"
-              size={18}
-              color={colors.onSurfaceVariant}
-            />
-          </SheetButton>
-
-          {/* External / Internal Button */}
-          <SheetButton
-            accessibilityLabel={`${isAlwaysExternal ? 'Download in Vega' : 'Open externally'}: ${item.server || 'Unknown Server'}`}
-            activeOpacity={0.7}
-            onPress={() => {
-              if (isAlwaysExternal) {
-                onPressVideo(item);
-              } else {
-                onPressExternalVideo?.(item);
-              }
-              closeSheet();
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={{
-              alignItems: 'center',
-              backgroundColor: colors.surfaceContainerHighest,
-              borderRadius: 10,
-              justifyContent: 'center',
-              padding: 8,
-            }}>
-            <MaterialCommunityIcons
-              name={isAlwaysExternal ? 'download-outline' : 'open-in-new'}
-              size={18}
-              color={colors.onSurfaceVariant}
-            />
-          </SheetButton>
-        </View>
-      </SheetRow>
-    ));
+    return null;
   };
 
   const renderSubtitleTab = () => {
@@ -857,8 +596,28 @@ const DownloadBottomSheet = ({
     return null;
   }
 
+  if (!videoDownloaded && activeTab === 1) {
+    return <DownloadSourcePicker streams={streams} loading={loading} title={title} error={error}
+      onDismiss={closeSheet} onSelect={stream => {
+        if (isAlwaysExternal && onPressExternalVideo) onPressExternalVideo(stream);
+        else onPressVideo(stream);
+        closeSheet();
+      }}
+      renderSourceActions={(stream, select) => <View style={{flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginBottom: 8}}>
+        <SheetButton accessibilityLabel={`Copy link for ${stream.server}`} onPress={() => handleCopy(stream.link)} style={{padding: 8}}>
+          <MaterialCommunityIcons name="content-copy" size={18} color={colors.onSurfaceVariant} />
+        </SheetButton>
+        {onPressExternalVideo && <SheetButton accessibilityLabel={`${isAlwaysExternal ? 'Download in Vega' : 'Open externally'}: ${stream.server}`}
+          onPress={() => select(() => {if (isAlwaysExternal) onPressVideo(stream); else onPressExternalVideo(stream); closeSheet();})} style={{padding: 8}}>
+          <MaterialCommunityIcons name={isAlwaysExternal ? 'download' : 'open-in-new'} size={18} color={colors.onSurfaceVariant} />
+        </SheetButton>}
+      </View>}
+      footer={hasSubtitles ? <SheetButton accessibilityLabel="Subtitle download sources" onPress={() => setActiveTab(2)} style={{padding: 10, alignItems: 'center'}}>
+        <Text style={{color: colors.primary}}>Subtitles ({downloadedSubs.length + streamSubtitles.length})</Text>
+      </SheetButton> : undefined} />;
+  }
+
   if (isTV) {
-    const closePreferred = hasSubtitles || loading || streams.length === 0;
     return (
       <Modal
         visible
@@ -867,10 +626,7 @@ const DownloadBottomSheet = ({
         onRequestClose={() => setModal(false)}
         onShow={() => {
           setTimeout(() => {
-            // Same target as hasTVPreferredFocus: the first source, else Close.
-            const handle =
-              findNodeHandle(closePreferred ? null : tvFirstRowRef.current) ??
-              findNodeHandle(tvCloseRef.current);
+            const handle = findNodeHandle(tvCloseRef.current);
             if (handle) UIManager.dispatchViewManagerCommand(handle, 'requestTVFocus', []);
           }, 250);
         }}>
@@ -895,7 +651,7 @@ const DownloadBottomSheet = ({
               ref={tvCloseRef}
               accessibilityRole="button"
               accessibilityLabel="Close downloads"
-              hasTVPreferredFocus={closePreferred}
+              hasTVPreferredFocus
               focusScale={1}
               onPress={() => setModal(false)}
               style={{alignSelf: 'flex-end', alignItems: 'center', justifyContent: 'center', minHeight: 48, minWidth: 100, marginBottom: 12}}>

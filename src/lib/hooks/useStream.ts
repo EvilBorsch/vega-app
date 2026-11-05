@@ -5,7 +5,7 @@ import {externalVideoStream} from '../services/videoIntent';
 import { useQuery } from '@tanstack/react-query';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { ToastAndroid } from 'react-native';
-import { providerManager } from '../services/ProviderManager';
+import {getStreamSources} from '../services/getStreamSources';
 import { settingsStorage } from '../storage';
 import { ifExists } from '../file/ifExists';
 import { Stream } from '../providers/types';
@@ -26,7 +26,6 @@ import {
   serverIdentity,
   type ServerIdentity,
 } from '../player/rememberedServer';
-import {fetchExtraTorrentStreams, mergeTrackerStreams} from '../providers/extraTorrentSources';
 import {streamInfoHash, useSwarmHealth} from '../player/swarmHealth';
 
 interface UseStreamOptions {
@@ -544,24 +543,8 @@ export const fetchStreamList = async ({
     if (canPromptWaf) guardWafPrompts(controller.signal, canPromptWaf);
     try {
       const providerValue = routeParams?.providerValue || provider;
-      // Torrentio lists only RuTracker and Rutor among Russian trackers, so
-      // JacRed and Knaben releases of the same title are added.
-      const extraStreams = providerValue === 'torrentio'
-        ? fetchExtraTorrentStreams(remoteLink, routeParams?.type, controller.signal)
-        : Promise.resolve([] as Stream[]);
-      let providerStreams: Stream[] = [];
-      try {
-        providerStreams = (await providerManager.getStream({
-          link: remoteLink,
-          type: routeParams?.type,
-          signal: controller.signal,
-          providerValue,
-        })) || [];
-      } catch (providerError) {
-        if (!(await extraStreams).length) throw providerError;
-        console.warn('Provider streams failed; showing tracker releases:', providerError);
-      }
-      const data = mergeTrackerStreams(providerStreams, await extraStreams);
+      const data = await getStreamSources({link: remoteLink, type: routeParams?.type,
+        signal: controller.signal, providerValue});
 
       // Filter out excluded qualities
       const excludedQualities = settingsStorage.getExcludedQualities() || [];

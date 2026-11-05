@@ -19,6 +19,7 @@ import {
   useSwarmTests,
   withKnownPeers,
   withProvisional,
+  stopSwarmTests,
   type LiveSample,
   type SwarmTestResult,
 } from '../src/lib/player/swarmTests';
@@ -46,6 +47,23 @@ const results = {
   ['b'.repeat(40)]: result({speed: 150 * 1024, seeds: 2}),
   ['e'.repeat(40)]: result({metadata: false, peers: 0}),
 };
+
+it('waits for temporary swarms to be removed before a download can create its output', async () => {
+  const {torrentManager} = require('../src/lib/torrentManager');
+  const hash = '7'.repeat(40);
+  let finish: () => void;
+  torrentManager.stopSwarmMonitor.mockImplementationOnce(() => new Promise<void>(resolve => {finish = resolve;}));
+  useSwarmTestStore.getState().start([hash]);
+  let complete = false;
+  const stopping = stopSwarmTests().then(() => {complete = true;});
+  await Promise.resolve();
+  expect(torrentManager.stopSwarmMonitor).toHaveBeenLastCalledWith([hash]);
+  expect(complete).toBe(false);
+  expect(useSwarmTestStore.getState().live[hash]).toBeUndefined();
+  finish!();
+  await stopping;
+  expect(complete).toBe(true);
+});
 // A 10-second test is noisy: slow is ranked below unknown, not as dead.
 
 

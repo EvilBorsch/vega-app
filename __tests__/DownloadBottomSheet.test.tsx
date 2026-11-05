@@ -3,6 +3,11 @@ import React from 'react';
 import renderer, {act} from 'react-test-renderer';
 
 const mockBottomSheetProps = jest.fn();
+jest.mock('../src/components/MovieServerDialog', () => ({__esModule: true, default: require('react-native').View}));
+jest.mock('../src/lib/player/swarmHealth', () => ({useSwarmHealth: (streams: unknown[]) => ({visible: streams, hidden: [], checking: false})}));
+jest.mock('../src/lib/tv', () => ({isTV: false}));
+jest.mock('../src/components/tv', () => ({TVFocusable: require('react-native').View, TVFocusGuide: require('react-native').View}));
+jest.mock('../src/components/ui/LoadingIndicator', () => ({__esModule: true, default: require('react-native').View}));
 
 jest.mock('@gorhom/bottom-sheet', () => {
   const ReactModule = require('react');
@@ -93,6 +98,7 @@ describe('DownloadBottomSheet', () => {
           onPressVideo={jest.fn()}
           onPressSubs={jest.fn()}
           error="No server found"
+          videoDownloaded
         />,
       );
     });

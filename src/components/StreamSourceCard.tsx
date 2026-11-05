@@ -10,25 +10,26 @@ import Text from './ui/Text';
 const TEST_COLORS = {good: '#A5E8C8', ok: '#F2D492', bad: '#FFB4AB', pending: undefined} as const;
 const TEST_ICONS = {good: 'speedometer', ok: 'speedometer-medium', bad: 'alert-circle-outline', pending: 'progress-clock'} as const;
 
-export default function StreamSourceCard({stream, selected = false, preferredFocus = false, onPress, test}: {
+export default function StreamSourceCard({stream, selected = false, preferredFocus = false, onPress, test, action = 'play'}: {
   stream: Pick<Stream, 'server' | 'title' | 'quality' | 'tag' | 'tags'>;
   selected?: boolean;
   preferredFocus?: boolean;
   onPress: () => void;
+  action?: 'play' | 'download';
   /** What briefly joining the release's swarm showed: speed and peers, or why it will not play. */
   test?: {text: string; tone: 'good' | 'ok' | 'bad' | 'pending'};
 }) {
   const colors = useM3Colors();
   const badges = streamBadges(stream);
   return <TVFocusable onPress={onPress} hasTVPreferredFocus={preferredFocus}
-    accessibilityLabel={`Play ${stream.server}. ${stream.title ? `${stream.title}. ` : ''}${badges.join(', ')}`}
+    accessibilityLabel={`${action === 'download' ? 'Download' : 'Play'} ${stream.server}. ${stream.title ? `${stream.title}. ` : ''}${badges.join(', ')}`}
     accessibilityState={{selected}}
     style={{padding: 14, marginBottom: 8, borderRadius: 16, borderWidth: 1,
       borderColor: selected ? colors.primary : colors.outlineVariant,
       backgroundColor: selected ? colors.secondaryContainer : colors.surfaceContainerHighest}}>
     <View style={{flexDirection: 'row', alignItems: 'center', marginBottom: 9, gap: 10}}>
       <View style={{width: 32, height: 32, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceContainerHigh}}>
-        <MaterialCommunityIcons name={selected ? 'check' : 'play'} size={20} color={colors.primary} />
+        <MaterialCommunityIcons name={selected ? 'check' : action === 'download' ? 'download' : 'play'} size={20} color={colors.primary} />
       </View>
       <Text role="titleMedium" style={{color: selected ? colors.onSecondaryContainer : colors.onSurface, flex: 1}}>{stream.server}</Text>
     </View>

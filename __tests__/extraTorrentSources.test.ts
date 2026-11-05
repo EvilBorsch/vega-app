@@ -3,6 +3,7 @@ jest.mock('../src/lib/storage', () => ({settingsStorage: {getTmdbApiKey: () => '
 
 import {
   jacredToStream,
+  collectSearchResults,
   matchesJacred,
   matchesWestern,
   mergeTrackerStreams,
@@ -12,6 +13,7 @@ import {
   mergeJacred,
   parseRutor,
   parseTorrentioTarget,
+  torrentHash,
   seasonsInTitle,
   titleVariants,
   type JacredTorrent,
@@ -298,4 +300,115 @@ describe('Stremio torrent addons', () => {
     expect(stream.link).toContain('&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce');
     expect(addonToStream('Peerflix', {infoHash: 'nothex'})).toBeUndefined();
   });
+});
+
+describe('additional Russian aggregators', () => {
+  it('splits native JacBlack tracker lists and does not label international releases RU', () => {
+    const international = jacredToStream(jacred('The Whale (2022) 1080p', {tracker: 'piratebay, yts'}));
+    expect(international.server).toBe('The Pirate Bay · YTS');
+    expect(international.tags).toContain('EN');
+    expect(international.tags).not.toContain('RU');
+    const russian = jacredToStream(jacred('Кит / The Whale (2022)', {tracker: 'rutracker, kinozal, bitru'}));
+    expect(russian.server).toBe('RuTracker · Kinozal · BitRu');
+    expect(russian.tags).toContain('RU');
+    expect(jacredToStream(jacred('Фрирен (2023)', {tracker: 'nyaa'})).tags).toContain('JA');
+    expect(jacredToStream(jacred('Кит (2022)', {tracker: 'mazepa, toloka'})).tags).toContain('UA');
+  });
+
+  it('deduplicates comma-separated native tracker names across mirrors', () => {
+    const [merged] = mergeJacred([
+      jacred('Кит (2022)', {tracker: 'rutracker, kinozal', sid: 12}),
+      jacred('Кит (2022)', {tracker: 'kinozal', sid: 4}),
+    ]);
+    expect(merged.trackers).toEqual(['rutracker', 'kinozal']);
+  });
+});
+
+describe('search deadlines', () => {
+  afterEach(() => jest.useRealTimers());
+
+  it('returns completed releases at the deadline and ignores late results', async () => {
+    jest.useFakeTimers();
+    let complete!: (results: string[]) => void;
+    const slow = new Promise<string[]>(resolve => { complete = resolve; });
+    const search = collectSearchResults([Promise.resolve(['Russian release']), slow], 14000);
+    await Promise.resolve();
+    jest.advanceTimersByTime(14000);
+    const result = await search;
+    expect(result).toEqual(['Russian release']);
+    complete(['late release']);
+    await Promise.resolve();
+    expect(result).toEqual(['Russian release']);
+  });
+
+  it('returns immediately when sources finish, tolerates failures and empty lists', async () => {
+    expect(await collectSearchResults([Promise.reject(new Error('offline')), Promise.resolve(['Russian release'])], 14000)).toEqual(['Russian release']);
+    expect(await collectSearchResults([], 14000)).toEqual([]);
+  });
+});
+
+describe('audio labels on duplicate torrents', () => {
+  it('keeps Russian audio when an international record has the strongest seeder count', () => {
+    const link = magnet('c'.repeat(40));
+    const english = {link, type: 'torrent', server: 'Comet', quality: '1080', tags: ['EN', '👤99', '2 GB'], tag: 'EN • 👤99 • 2 GB'};
+    const russian = {link, type: 'torrent', server: 'RuTracker', tags: ['RU', '👤4'], title: 'Кит / The Whale (2022)'};
+    const [merged] = mergeByHash([english, russian]);
+    expect(merged.tags).toEqual(['EN', '👤99', '2 GB', 'RU']);
+    expect(merged.tag).toBe('EN • 👤99 • 2 GB • RU');
+    const [primary] = mergeTrackerStreams([english], [russian]);
+    expect(primary.tags).toEqual(['EN', '👤99', '2 GB', 'RU']);
+    expect(primary.server).toBe('Comet');
+  });
+});
+
+describe('exact torrent duplicates', () => {
+  const a = '0123456789abcdef0123456789abcdef01234567';
+  const b = '1111111111111111111111111111111111111111';
+  const stream = (link: string, server: string) => ({link, server, type: 'torrent', title: 'Same movie.mkv', tags: ['RU', '👤12', '2 GB']});
+
+  it('removes duplicate provider rows even when extra sources return nothing', () => {
+    const direct = {link: 'https://cdn/movie.mp4', type: 'mp4', server: 'CDN'};
+    const merged = mergeTrackerStreams([direct, stream(`magnet:?xt=urn:btih:${a}`, 'Rutor'), stream(`magnet:?xt=urn:btih:${a.toUpperCase()}&dn=Other+name`, 'RuTracker'), stream(`magnet:?xt=urn:btih:${b}`, 'Kinozal')], []);
+    expect(merged).toHaveLength(3);
+    expect(merged[0]).toBe(direct);
+    expect(merged.filter(item => item.type === 'torrent').map(item => torrentHash(item.link))).toEqual([a, b]);
+  });
+
+  it('preserves the union of tracker addresses for one torrent', () => {
+    const [merged] = mergeByHash([
+      stream(`magnet:?xt=urn:btih:${a}&tr=udp%3A%2F%2Ffirst.test%3A80`, 'Rutor'),
+      stream(`magnet:?dn=movie&xt=urn:btih:${a}&tr=https%3A%2F%2Fsecond.test%2Fannounce`, 'RuTracker'),
+    ]);
+    expect(new URLSearchParams(merged.link.slice(8)).getAll('tr')).toEqual(['udp://first.test:80', 'https://second.test/announce']);
+  });
+
+  it('normalizes encoded and Base32 hashes but rejects malformed hash prefixes', () => {
+    expect(torrentHash('magnet:?xt=urn%3Abtih%3A0123456789ABCDEF0123456789ABCDEF01234567')).toBe(a);
+    expect(torrentHash('magnet:?xt=urn:btih:AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH')).toBe(a);
+    expect(torrentHash(`magnet:?xt=urn:btih:${a}z`)).toBe('');
+    expect(torrentHash(`https://cdn/movie.mp4?xt=urn:btih:${a}`)).toBe('');
+  });
+
+  it('keeps independent torrents despite identical movie title, size and quality', () => {
+    const merged = mergeTrackerStreams([stream(`magnet:?xt=urn:btih:${a}`, 'Rutor')], [stream(`magnet:?xt=urn:btih:${b}`, 'Kinozal')]);
+    expect(merged).toHaveLength(2);
+  });
+});
+
+it('keeps tracker addresses from every JacRed mirror before stream conversion', () => {
+  const hash = '0123456789abcdef0123456789abcdef01234567';
+  const [merged] = mergeJacred([
+    jacred('Кит (2022)', {magnet: `magnet:?xt=urn:btih:${hash}&tr=udp%3A%2F%2Ffirst.test%3A80`}),
+    jacred('Кит (2022)', {magnet: `magnet:?xt=urn:btih:${hash}&tr=https%3A%2F%2Fsecond.test%2Fannounce`}),
+  ]);
+  expect(new URLSearchParams(merged.magnet!.slice(8)).getAll('tr')).toEqual(['udp://first.test:80', 'https://second.test/announce']);
+});
+
+it('preserves disjoint provider metadata fields when adding Russian audio to a duplicate', () => {
+  const link = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567';
+  const original = {link, type: 'torrent', server: 'Provider', tags: ['EN'], tag: 'WEB-DL • HDR • 👤8', headers: {Referer: 'https://provider.test/'}};
+  const [merged] = mergeTrackerStreams([original], [{link, type: 'torrent', server: 'RuTracker', tags: ['RU']}]);
+  expect(merged.tags).toEqual(['EN', 'WEB-DL', 'HDR', '👤8', 'RU']);
+  expect(merged.headers).toEqual(original.headers);
+  expect(original.tags).toEqual(['EN']);
 });

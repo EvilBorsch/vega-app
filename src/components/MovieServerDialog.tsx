@@ -55,11 +55,13 @@ export default function MovieServerDialog({
   );
   // The releases at the top are joined briefly to measure real peers and
   // speed, so the list can be ordered by what will actually play fast.
-  const [tested, setTested] = useState(matching);
-  const {results, running, live} = useSwarmTests(tested, !loading);
+  const candidates = useMemo(() => [...new Set([
+    ...sortBySpeed(matching, {}, sort),
+    ...sortBySpeed(streams, {}, sort),
+  ])], [matching, streams, sort]);
+  const {results, running, live} = useSwarmTests(candidates, !loading && !checking);
   const filtered = useMemo(() => sortBySpeed(matching, results, sort), [matching, results, sort]);
-  React.useEffect(() => setTested(filtered), [filtered]);
-  const progress = testProgress(filtered, results, running);
+  const progress = testProgress(candidates, results, running);
   const progressText = describeProgress(progress);
   const hint = slowLanguageHint(filtered, streams, results, languages);
   // Swarms change: measure the listed releases again.

@@ -5,7 +5,7 @@ jest.mock('../src/lib/storage', () => ({
     setString: (key: string, value: string) => mockSaved.set(key, value),
   },
 }));
-jest.mock('../src/lib/torrentManager', () => ({torrentManager: {probeSwarms: jest.fn()}}));
+jest.mock('../src/lib/torrentManager', () => ({torrentManager: {probeSwarms: jest.fn(), scrapeSwarms: jest.fn()}}));
 
 import {
   applySwarmHealth,
@@ -28,14 +28,13 @@ const probe = {peers: {['a'.repeat(40)]: 31, ['b'.repeat(40)]: 0, ['c'.repeat(40
 
 beforeEach(() => mockSaved.clear());
 
-it('hides releases nobody shares and labels the ones the DHT found', () => {
+it('keeps unmeasured releases available and labels the ones the DHT found', () => {
   const {visible, hidden} = applySwarmHealth([alive, dead, seeded, direct], probe, new Set(), new Set());
-  expect(visible.map(stream => stream.server)).toEqual(['Kinozal', 'Kinozal', 'CDN']);
+  expect(visible.map(stream => stream.server)).toEqual(['Kinozal', 'Kinozal', 'Kinozal', 'CDN']);
   expect(visible[0].tags).toContain('👥31');
   // A fresh seeder count from an index outweighs an empty DHT lookup.
-  expect(visible[1].link).toBe(seeded.link);
-  expect(hidden.map(stream => stream.link)).toEqual([dead.link]);
-  expect(hidden[0].tags).toContain('No peers');
+  expect(visible[2].link).toBe(seeded.link);
+  expect(hidden).toEqual([]);
 });
 
 it('hides nothing when the DHT found nobody at all (unreachable or cold)', () => {
@@ -71,10 +70,10 @@ describe('live counts from public trackers', () => {
     expect(live.tag).toBe('1080p • 👤187 • ⬇40 • RU • 9.1 GB');
   });
 
-  it('keeps a higher live count an index already had, and changes nothing without data', () => {
+  it('replaces index counts with current tracker counts and changes nothing without a response', () => {
     const torrentio = {...stale, tags: ['1080p', '👤20', '2.74 GB'], tag: '1080p • 👤20 • 2.74 GB'};
-    expect(withLiveCounts(torrentio, {seeders: 12, leechers: 0}).tags).toEqual(['1080p', '👤20', '2.74 GB']);
-    expect(withLiveCounts(stale, {seeders: 0, leechers: 0})).toBe(stale);
+    expect(withLiveCounts(torrentio, {seeders: 12, leechers: 0}).tags).toEqual(['1080p', '👤12', '2.74 GB']);
+    expect(withLiveCounts(stale, {seeders: 0, leechers: 0}).tags).toEqual(['1080p', '👤0', 'RU', '9.1 GB']);
     expect(withLiveCounts(stale, undefined)).toBe(stale);
   });
 
@@ -84,4 +83,55 @@ describe('live counts from public trackers', () => {
     expect(visible).toHaveLength(1);
     expect(visible[0].tags).toContain('👤5');
   });
+});
+
+it('uses the tracker response instead of an older larger advertised count, including zero', () => {
+  const {withLiveCounts} = require('../src/lib/player/swarmHealth');
+  const advertised = {...alive, tags: ['RU', '👤200', '⬇90'], tag: 'RU • 👤200 • ⬇90'};
+  expect(withLiveCounts(advertised, {seeders: 12, leechers: 3}).tags).toEqual(['RU', '👤12', '⬇3']);
+  expect(withLiveCounts(advertised, {seeders: 0, leechers: 0}).tags).toEqual(['RU', '👤0']);
+});
+
+it('does not discard an unmeasured torrent just because public DHT returned zero', () => {
+  const {visible, hidden} = applySwarmHealth([dead], probe, new Set(), new Set());
+  expect(visible).toHaveLength(1);
+  expect(hidden).toEqual([]);
+});
+
+it('keeps the count-check gate closed until current tracker counts arrive', async () => {
+  const React = require('react');
+  const {act, create} = require('react-test-renderer');
+  const {QueryClient, QueryClientProvider} = require('@tanstack/react-query');
+  const {Platform} = require('react-native');
+  const {torrentManager} = require('../src/lib/torrentManager');
+  const {useSwarmHealth} = require('../src/lib/player/swarmHealth');
+  const client = new QueryClient({defaultOptions: {queries: {retry: false, gcTime: Infinity}}});
+  const originalOS = Platform.OS;
+  Platform.OS = 'android';
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  let complete!: (value: unknown) => void;
+  torrentManager.scrapeSwarms.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+  torrentManager.probeSwarms.mockResolvedValue({peers: {['a'.repeat(40)]: 5}});
+  let state: any;
+  const keep = new Set<string>();
+  function Probe() { state = useSwarmHealth([alive], {enabled: true, keep}); return null; }
+  let tree: any;
+  try {
+    await act(async () => { tree = create(React.createElement(QueryClientProvider, {client}, React.createElement(Probe))); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(state.checking).toBe(true);
+    await act(async () => { complete({['a'.repeat(40)]: {seeders: 12, leechers: 3}}); await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(state.checking).toBe(false);
+    expect(state.visible[0].tags).toContain('👤12');
+  } finally {
+    await act(async () => { tree?.unmount(); });
+    client.clear();
+    Platform.OS = originalOS;
+  }
+});
+
+it('replaces stale counts in compact provider tag strings too', () => {
+  const {withLiveCounts} = require('../src/lib/player/swarmHealth');
+  const previous = {...alive, tags: ['RU'], tag: '1080p•👤200·⬇90\nRU'};
+  expect(withLiveCounts(previous, {seeders: 12, leechers: 3}).tag).toBe('1080p • 👤12 • ⬇3 • RU');
 });

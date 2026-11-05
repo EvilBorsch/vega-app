@@ -16,6 +16,7 @@ import {
   sortBySpeed,
   testProgress,
   useSwarmTestStore,
+  useSwarmTests,
   withKnownPeers,
   withProvisional,
   type LiveSample,
@@ -215,5 +216,126 @@ describe('live measuring', () => {
     const slowStart = withProvisional({}, {['a'.repeat(40)]: sample({dataMs: 9_000, bytes: 1024, rate: 1024})});
     const measuredSlow = {...slowStart, ['b'.repeat(40)]: results['b'.repeat(40)]};
     expect(sortBySpeed([slow, fast], measuredSlow, 'speed')[0]).toBe(fast);
+  });
+});
+
+it('tests equivalent encoded torrent identities once and reuses a running or completed check', () => {
+  const hash = '0123456789abcdef0123456789abcdef01234567';
+  const list = [
+    {...fast, link: 'magnet:?xt=urn:btih:AERUKZ4JVPG66AJDIVTYTK6N54ASGRLH'},
+    {...fast, link: 'magnet:?xt=urn%3Abtih%3A0123456789abcdef0123456789abcdef01234567'},
+  ];
+  expect(nextToTest(list, {}, {})).toEqual([hash]);
+  expect(nextToTest(list, {}, {[hash]: true})).toEqual([]);
+  const saved = {[hash]: result({speed: 2e6})};
+  expect(nextToTest(list, saved, {})).toEqual([]);
+  expect(testProgress(list, saved, {})).toEqual({total: 1, tested: 1, testing: 0});
+});
+
+it('prioritizes never-measured releases before retrying a failed one', () => {
+  const retry = release('9', '1080');
+  const untouched = release('8', '1080');
+  expect(nextToTest([retry, untouched], {['9'.repeat(40)]: result({metadata: false})}, {}, {['9'.repeat(40)]: 1}))
+    .toEqual(['8'.repeat(40), '9'.repeat(40)]);
+});
+
+it('measures the entire queue beyond the first 24 and promotes a fast release from its end', async () => {
+  const React = require('react');
+  const {act, create} = require('react-test-renderer');
+  const {Platform} = require('react-native');
+  const {torrentManager} = require('../src/lib/torrentManager');
+  const originalOS = Platform.OS;
+  Platform.OS = 'android';
+  jest.useFakeTimers();
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  useSwarmTestStore.setState({results: {}, running: {}, live: {}, failures: {}});
+  const list = Array.from({length: 35}, (_, index) => ({server: 'Tracker', type: 'torrent', link: `magnet:?xt=urn:btih:${(index + 1).toString(16).padStart(40, '0')}`, tags: [`👤${100 - index}`]}));
+  torrentManager.monitorSwarms.mockResolvedValue(undefined);
+  torrentManager.stopSwarmMonitor.mockResolvedValue(undefined);
+  torrentManager.swarmStats.mockImplementation(async (hashes: string[]) => Object.fromEntries(hashes.map(hash => {
+    const speed = parseInt(hash, 16) * 100_000;
+    return [hash, {metadata: true, elapsedMs: 10_000, dataMs: 10_000, bytes: speed * 10, rate: speed, maxRate: speed, peers: 5, seeds: 3, maxPeers: 5, maxSeeds: 3, known: 8, done: true, peerList: []}];
+  })));
+  let tree: any;
+  function Probe() { useSwarmTests(list, true); return null; }
+  try {
+    await act(async () => { tree = create(React.createElement(Probe)); });
+    for (let i = 0; i < 12; i++) await act(async () => { jest.advanceTimersByTime(1000); });
+    const completed = useSwarmTestStore.getState().results;
+    expect(Object.keys(completed)).toHaveLength(35);
+    expect(sortBySpeed(list, completed, 'speed')[0].link).toBe('magnet:?xt=urn:btih:0000000000000000000000000000000000000023');
+    const started = torrentManager.monitorSwarms.mock.calls.flatMap((call: any[]) => call[0]);
+    expect(started).toHaveLength(35);
+  } finally {
+    await act(async () => { tree?.unmount(); });
+    jest.useRealTimers();
+    Platform.OS = originalOS;
+    useSwarmTestStore.setState({results: {}, running: {}, live: {}, failures: {}});
+  }
+});
+
+it('gives untouched tail releases priority over expired early results', () => {
+  const early = release('1', '1080');
+  const tail = release('2', '1080');
+  const expired = result({testedAt: Date.now() - 31 * 60 * 1000, speed: 500_000});
+  expect(nextToTest([early, tail], {['1'.repeat(40)]: expired}, {})).toEqual(['2'.repeat(40), '1'.repeat(40)]);
+});
+
+async function runSchedulerFixture(monitor: any, stats: any, check: (control: any) => Promise<void>) {
+  const React = require('react');
+  const {act, create} = require('react-test-renderer');
+  const {Platform} = require('react-native');
+  const {torrentManager} = require('../src/lib/torrentManager');
+  const originalOS = Platform.OS;
+  Platform.OS = 'android';
+  jest.useFakeTimers();
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  useSwarmTestStore.setState({results: {}, running: {}, live: {}, failures: {}});
+  torrentManager.monitorSwarms.mockReset().mockImplementation(monitor);
+  torrentManager.swarmStats.mockReset().mockImplementation(stats);
+  torrentManager.stopSwarmMonitor.mockReset().mockResolvedValue(undefined);
+  const list = Array.from({length: 8}, (_, index) => ({server: 'Tracker', type: 'torrent', link: `magnet:?xt=urn:btih:${(index + 1).toString(16).padStart(40, '0')}`}));
+  let tree: any;
+  function Probe({enabled}: {enabled: boolean}) { useSwarmTests(list, enabled); return null; }
+  try {
+    await act(async () => { tree = create(React.createElement(Probe, {enabled: true})); });
+    await check({torrentManager,
+      tick: async (seconds: number) => { for (let i = 0; i < seconds; i++) await act(async () => { jest.advanceTimersByTime(1000); }); },
+      enable: async (enabled: boolean) => { await act(async () => tree.update(React.createElement(Probe, {enabled}))); },
+      act,
+    });
+  } finally {
+    await act(async () => { tree?.unmount(); });
+    jest.useRealTimers();
+    Platform.OS = originalOS;
+    useSwarmTestStore.setState({results: {}, running: {}, live: {}, failures: {}});
+  }
+}
+
+it('moves past monitors that never return any sample', async () => {
+  await runSchedulerFixture(async () => undefined, async () => ({}), async ({tick}) => {
+    await tick(35);
+    const results = useSwarmTestStore.getState().results;
+    expect(Object.keys(results)).toHaveLength(8);
+    expect(describeTest(results['0000000000000000000000000000000000000001'])?.text).toBe('Speed check unavailable');
+  });
+});
+
+it('gives other releases a chance after a monitor start error', async () => {
+  await runSchedulerFixture(async () => { throw new Error('start failed'); }, async () => ({}), async ({tick}) => {
+    await tick(10);
+    expect(Object.keys(useSwarmTestStore.getState().results)).toHaveLength(8);
+  });
+});
+
+it('waits for the old stop operation before starting a reopened source list', async () => {
+  await runSchedulerFixture(async () => undefined, async () => ({}), async ({torrentManager, enable, act}) => {
+    let finishStop!: () => void;
+    torrentManager.stopSwarmMonitor.mockImplementationOnce(() => new Promise<void>(resolve => { finishStop = resolve; }));
+    await enable(false);
+    await enable(true);
+    expect(torrentManager.monitorSwarms).toHaveBeenCalledTimes(1);
+    await act(async () => { finishStop(); });
+    expect(torrentManager.monitorSwarms).toHaveBeenCalledTimes(2);
   });
 });

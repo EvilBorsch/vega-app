@@ -171,3 +171,14 @@ APK SHA-256: `7fed98805a8fac97a9161f8a6f83f0767017c29b33fbde3e605331c560af120b`,
 - **"No Provider Installed" after a network error on first launch.** Setting up the provider source and Torrentio was retried only at the next start; it is now retried after 5, 15, 30, 60 and 120 s.
 
 APK SHA-256: `5a1b6d20ccb54e31078be39d162633a61480da90c7ef67efa2f0bb054d3561db`, versionCode 225, same local key. `tsc` passes; Jest 153 of 162 suites, 1,139 tests (the same two upstream failures). The orientation fix was not verified on a device (the emulator run was stopped before it got there).
+
+## 5.3.0-fixes.16: more sources and live seeder counts
+
+A source survey (about 60 candidates checked live from this machine) found nothing that adds Russian releases with peers beyond JacRed and Rutor, but two Stremio torrent addons that answer without an account and add releases Vega lacked, and a fix for stale seeder counts:
+
+- **Comet** (`comet.feels.legal`) and **Peerflix** (`addon.peerflix.mov`), by IMDb id and episode. Releases with peers they added over Torrentio, JacRed, Rutor, Knaben, apibay and Torrents-CSV: Comet 68 / 118 / 3, Peerflix 24 / 64 / 1 (The Whale / Project Hail Mary / American Crime Story S03E08). Releases they list with 0 seeders are skipped, and at most 40 per addon without a count are kept. Live totals with them: The Whale 257 releases (95 before), Project Hail Mary 371 (152), ACS S03E08 60 (55).
+- **Live seeders and leechers.** JacRed's counts matched a live tracker scrape for only 15% of releases (Torrentio's for 73%). The source list now asks eight public trackers (UDP scrape, BEP 15, 70 releases per packet, `TorrentModule.scrapeSwarms`) and shows their counts instead of an index snapshot; an index's own live count is kept when it is higher.
+
+Checked and not added: StremThru (duplicates Comet), TorrentsDB, TGx, torrentdownloads and limetorrents RSS (a few releases each), NNM-Club and MegaPeer pages (no new releases; scraping), MediaFusion (empty without debrid), and a list of unreachable or login-only trackers.
+
+APK SHA-256: `6f40dcefcb6893d62f5639d6ebf13900055dfb0421660bd7dd5d603810b127eb`, versionCode 226, same local key. `tsc` passes; Jest 153 of 162 suites, 1,145 tests (the same two upstream failures). Not run on a device.

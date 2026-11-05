@@ -6,6 +6,7 @@ import {
   matchesJacred,
   matchesWestern,
   mergeTrackerStreams,
+  addonToStream,
   jackettToJacred,
   mergeByHash,
   mergeJacred,
@@ -257,5 +258,44 @@ describe('single-episode releases', () => {
     expect(matchesJacred({...lostfilm('Американская история преступлений (3 сезон) [+10 серия] [Ultradox] [720p]'), tracker: 'ultradox'}, episode(8))).toBe(true);
     expect(matchesJacred({...lostfilm('Американская история преступлений (3 сезон) [+6 серия] [Ultradox] [720p]'), tracker: 'ultradox'}, episode(8))).toBe(false);
     expect(matchesJacred({...lostfilm('Американская история преступлений / Сезон 3, серия 8 / 2021'), tracker: 'rutor'}, episode(8))).toBe(true);
+  });
+});
+
+describe('Stremio torrent addons', () => {
+  it('reads a Comet stream: release name, seeders, size, origin and flag languages', () => {
+    const stream = addonToStream('Comet', {
+      name: '[TORRENT🧲] Comet 1080p',
+      description: '📄 American.Crime.Story.S03E08.VOSTFR.1080p.WEB-DL.DDP5.1.H.264-LPKFM\n📹 avc | 🔊 Dolby Digital Plus • 5.1\n⭐ WEB-DL | 🏷️ LPKFM\n👤 2 💾 3.2 GB 🔎 Comet|Ygg API\n🇫🇷',
+      infoHash: 'C396BC6ED04670A5A106ABAD84C7DEA831DE39FC',
+      sources: ['udp://tracker-udp.gbitt.info:80/announce'],
+    })!;
+    expect(stream.server).toBe('Comet');
+    expect(stream.title).toBe('American.Crime.Story.S03E08.VOSTFR.1080p.WEB-DL.DDP5.1.H.264-LPKFM');
+    expect(stream.link).toMatch(/^magnet:\?xt=urn:btih:c396bc6ed04670a5a106abad84c7dea831de39fc&dn=.+&tr=udp/);
+    expect(stream.tags).toEqual(expect.arrayContaining(['1080p', '👤2', 'FR', '3.2 GB']));
+  });
+
+  it('names the index a Comet release came from and leaves out a missing seeder count', () => {
+    const stream = addonToStream('Comet', {
+      description: '📄 American Crime Story S03E08 2160p DSNP WEB-DL mkv\n💾 4.2 GB 🔎 DMM',
+      infoHash: 'c270c5ede73a20b7bf1db4783447da8ceb3edb07',
+      behaviorHints: {videoSize: 4480055901},
+    })!;
+    expect(stream.server).toBe('Comet · DMM');
+    expect(stream.tags!.some(tag => tag.startsWith('👤'))).toBe(false);
+    expect(stream.tags).toEqual(expect.arrayContaining(['2160p', 'EN']));
+  });
+
+  it('reads a Peerflix stream and skips items without a valid hash', () => {
+    const stream = addonToStream('Peerflix', {
+      name: 'Peerflix 1080p',
+      title: 'American.Crime.Story.S03.COMPLETE.1080p.WEBRip.AC3.x264-LESS\nAmerican.Crime.Story.S03E08.1080p.WEBRip.mkv\n🇬🇧\n  👤 8 💾 1.29 GB 🌐 Peerflix',
+      infoHash: '5c643793147388eb614c919191a080ed186ded57',
+      sources: ['tracker:udp://open.stealth.si:80/announce'],
+    })!;
+    expect(stream.title).toBe('American.Crime.Story.S03.COMPLETE.1080p.WEBRip.AC3.x264-LESS');
+    expect(stream.tags).toEqual(expect.arrayContaining(['👤8', 'EN', '1.29 GB']));
+    expect(stream.link).toContain('&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce');
+    expect(addonToStream('Peerflix', {infoHash: 'nothex'})).toBeUndefined();
   });
 });

@@ -65,6 +65,12 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
         private const val TEST_BYTES = 24L * 1024L * 1024L
         private val testing = java.util.concurrent.ConcurrentHashMap<String, Long>()
         private val monitored = java.util.concurrent.ConcurrentHashMap<String, MonitorSample>()
+        // Public trackers asked for live seeder counts (BEP 15 UDP scrape).
+        private val SCRAPE_TRACKERS = listOf(
+            "tracker.opentrackr.org" to 1337, "open.stealth.si" to 80, "tracker.torrent.eu.org" to 451,
+            "exodus.desync.com" to 6969, "open.demonii.com" to 1337, "tracker.qu.ax" to 6969,
+            "opentor.net" to 6969, "retracker01-msk-virt.corbina.net" to 80,
+        )
         // Monitored releases the player picked; stopping the monitor leaves them running.
         private val claimed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         private var sessionManager: SessionManager? = null
@@ -1005,6 +1011,81 @@ class TorrentModule(reactContext: ReactApplicationContext) : ReactContextBaseJav
             }
             try { promise.resolve(null) } catch (_: Throwable) {}
         }.start()
+    }
+
+    /**
+     * Live seeders and leechers of releases from public trackers (UDP scrape,
+     * up to 70 releases per packet): {hash: {seeders, leechers, trackers}}.
+     * Index snapshots are often months old.
+     */
+    @ReactMethod
+    fun scrapeSwarms(hashes: ReadableArray, promise: Promise) {
+        Thread {
+            try {
+                val list = (0 until hashes.size()).mapNotNull { hashes.getString(it)?.lowercase() }
+                    .filter { it.length == 40 }.distinct()
+                val best = java.util.concurrent.ConcurrentHashMap<String, IntArray>()
+                val threads = SCRAPE_TRACKERS.map { (host, port) ->
+                    Thread {
+                        for ((hash, counts) in scrapeTracker(host, port, list)) {
+                            best.merge(hash, intArrayOf(counts[0], counts[1], 1)) { a, b ->
+                                intArrayOf(maxOf(a[0], b[0]), maxOf(a[1], b[1]), a[2] + b[2])
+                            }
+                        }
+                    }.also { it.start() }
+                }
+                threads.forEach { it.join(9000) }
+                val result = WritableNativeMap()
+                for ((hash, counts) in best) {
+                    result.putMap(hash, WritableNativeMap().apply {
+                        putInt("seeders", counts[0])
+                        putInt("leechers", counts[1])
+                        putInt("trackers", counts[2])
+                    })
+                }
+                promise.resolve(result)
+            } catch (e: Throwable) {
+                try { promise.reject("SCRAPE_ERROR", e.message, e) } catch (_: Throwable) {}
+            }
+        }.start()
+    }
+
+    // One tracker: connect, then scrape the hashes in packets of 70 (BEP 15).
+    private fun scrapeTracker(host: String, port: Int, hashes: List<String>): Map<String, IntArray> {
+        val out = HashMap<String, IntArray>()
+        try {
+            java.net.DatagramSocket().use { socket ->
+                socket.soTimeout = 2500
+                val address = java.net.InetAddress.getByName(host)
+                fun exchange(request: ByteArray): ByteArray {
+                    socket.send(java.net.DatagramPacket(request, request.size, address, port))
+                    val buffer = ByteArray(2048)
+                    val packet = java.net.DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    return buffer.copyOf(packet.length)
+                }
+                var transaction = (System.nanoTime() and 0x7fffffffL).toInt()
+                val connect = java.nio.ByteBuffer.allocate(16).putLong(0x41727101980L).putInt(0).putInt(transaction).array()
+                val reply = java.nio.ByteBuffer.wrap(exchange(connect))
+                if (reply.limit() < 16 || reply.getInt(0) != 0 || reply.getInt(4) != transaction) return out
+                val connection = reply.getLong(8)
+                for (chunk in hashes.chunked(70)) {
+                    transaction++
+                    val request = java.nio.ByteBuffer.allocate(16 + 20 * chunk.size)
+                        .putLong(connection).putInt(2).putInt(transaction)
+                    for (hash in chunk) {
+                        request.put(ByteArray(20) { i -> hash.substring(2 * i, 2 * i + 2).toInt(16).toByte() })
+                    }
+                    val answer = java.nio.ByteBuffer.wrap(exchange(request.array()))
+                    if (answer.limit() < 8 || answer.getInt(0) != 2 || answer.getInt(4) != transaction) break
+                    chunk.forEachIndexed { i, hash ->
+                        val at = 8 + i * 12
+                        if (at + 12 <= answer.limit()) out[hash] = intArrayOf(answer.getInt(at), answer.getInt(at + 8))
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return out
     }
 
     /** The viewer picked a tested release: keep it running for the player. */

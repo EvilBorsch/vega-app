@@ -141,6 +141,14 @@ class TorrentManager {
     await TorrentModule.stopSwarmMonitor(infoHashes);
   }
 
+  /** Live seeders and leechers from public trackers, keyed by info hash. */
+  async scrapeSwarms(
+    infoHashes: string[],
+  ): Promise<Record<string, {seeders: number; leechers: number; trackers: number}>> {
+    await this.init();
+    return (await TorrentModule.scrapeSwarms(infoHashes)) || {};
+  }
+
   /** Keeps a tested release running for the player instead of removing it. */
   async claimSwarmTest(infoHash: string): Promise<void> {
     if (!this.isInitialized) return;
